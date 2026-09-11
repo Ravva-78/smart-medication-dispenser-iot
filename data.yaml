@@ -1,0 +1,7 @@
+path: C:/DEV/Projects/College_Projects/ProjectWork/ProjectWork/core/dataset
+train: images/train
+val: images/val
+test: images/test
+
+names:
+  0: blister_strip

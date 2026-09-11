@@ -1,0 +1,25 @@
+{
+  "total": 15,
+  "present": 12,
+  "missing": 3,
+  "avg_confidence": 0.9970,
+  "missing_indices": [11, 14, 15],
+  "status": "Missing 3 Pill(s)",
+  "pockets": [
+    {"index": 1, "class": "present", "confidence": 0.999, "bbox": [10, 10, 50, 50]},
+    {"index": 2, "class": "present", "confidence": 0.998, "bbox": [60, 10, 100, 50]},
+    {"index": 3, "class": "present", "confidence": 0.998, "bbox": [110, 10, 150, 50]},
+    {"index": 4, "class": "present", "confidence": 0.999, "bbox": [160, 10, 200, 50]},
+    {"index": 5, "class": "present", "confidence": 0.998, "bbox": [210, 10, 250, 50]},
+    {"index": 6, "class": "present", "confidence": 0.999, "bbox": [10, 60, 50, 100]},
+    {"index": 7, "class": "present", "confidence": 0.998, "bbox": [60, 60, 100, 100]},
+    {"index": 8, "class": "present", "confidence": 0.997, "bbox": [110, 60, 150, 100]},
+    {"index": 9, "class": "present", "confidence": 0.999, "bbox": [160, 60, 200, 100]},
+    {"index": 10, "class": "present", "confidence": 0.998, "bbox": [210, 60, 250, 100]},
+    {"index": 11, "class": "missing", "confidence": 0.995, "bbox": [10, 110, 50, 150]},
+    {"index": 12, "class": "present", "confidence": 0.998, "bbox": [60, 110, 100, 150]},
+    {"index": 13, "class": "present", "confidence": 0.998, "bbox": [110, 110, 150, 150]},
+    {"index": 14, "class": "missing", "confidence": 0.994, "bbox": [160, 110, 200, 150]},
+    {"index": 15, "class": "missing", "confidence": 0.996, "bbox": [210, 110, 250, 150]}
+  ]
+}

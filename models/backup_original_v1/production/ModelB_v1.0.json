@@ -1,0 +1,17 @@
+{
+  "name": "Blister Pocket Detector",
+  "version": "1.0.0",
+  "stage": 3,
+  "architecture": "YOLO11s",
+  "imgsz": 640,
+  "confidence_threshold": 0.65,
+  "precision": 0.9990,
+  "recall": 1.0000,
+  "mAP50": 0.9950,
+  "mAP50_95": 0.7040,
+  "training_dataset": "Blister Pocket Dataset v1",
+  "total_images": 416,
+  "total_annotations": 5622,
+  "device": "cuda:0 (RTX 3060)",
+  "date": "2026-07-27"
+}

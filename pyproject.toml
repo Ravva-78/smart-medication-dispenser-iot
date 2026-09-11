@@ -1,0 +1,10 @@
+[tool.pyright]
+venvPath = "."
+venv = ".venv311"
+extraPaths = ["."]
+
+[tool.pyrefly]
+venvPath = "."
+venv = ".venv311"
+extraPaths = ["."]
+disable-type-errors-in-ide = true

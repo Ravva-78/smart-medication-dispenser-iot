@@ -1,0 +1,19 @@
+{
+  "name": "Blister Strip Detector",
+  "version": "2.0.0",
+  "stage": 1,
+  "architecture": "YOLO11s",
+  "imgsz": 640,
+  "confidence_threshold": 0.50,
+  "precision": 0.9852,
+  "recall": 1.0000,
+  "mAP50": 0.9950,
+  "mAP50_95": 0.8906,
+  "training_dataset": "Real Blister Strip Dataset v2 (Person_1)",
+  "total_images": 605,
+  "train_images": 503,
+  "val_images": 27,
+  "test_images": 75,
+  "device": "cuda:0 (NVIDIA GeForce RTX 3050 Laptop GPU)",
+  "date": "2026-09-10"
+}

@@ -1,0 +1,9 @@
+{
+  "total": 10,
+  "present": 12,
+  "missing": 2,
+  "avg_confidence": 0.9500,
+  "missing_indices": [2, 2],
+  "status": "Invalid State",
+  "pockets": []
+}

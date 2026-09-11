@@ -1,0 +1,18 @@
+{
+  "name": "Tablet Present/Missing Classifier",
+  "version": "1.0.0",
+  "stage": 5,
+  "architecture": "MobileNetV3-Small",
+  "imgsz": 224,
+  "confidence_threshold": 0.50,
+  "accuracy": 0.9976,
+  "auc_roc": 0.9978,
+  "precision_present": 1.0000,
+  "recall_present": 1.0000,
+  "precision_missing": 0.9886,
+  "recall_missing": 0.9886,
+  "training_dataset": "Pocket Classifier Dataset v1",
+  "total_crops": 5622,
+  "device": "cuda:0 (RTX 3060)",
+  "date": "2026-07-27"
+}

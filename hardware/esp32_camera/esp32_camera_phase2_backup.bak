@@ -1,0 +1,285 @@
+/**
+ * esp32_camera.ino
+ *
+ * ESP32-S3 WROOM-CAM + OV2640 Firmware (Phase 2)
+ *
+ * Purpose:
+ *   1. Initialize the camera module on ESP32-S3 using proven RGB565.
+ *   2. Connect to Wi-Fi hotspot.
+ *   3. Capture a frame in RGB565, convert to JPEG in software.
+ *   4. Perform a SINGLE HTTP POST upload to FastAPI backend using multipart/form-data.
+ *   5. Print detailed metrics & response, then idle to prevent backend flooding.
+ */
+
+#include "esp_camera.h"
+#include "img_converters.h"
+#include <WiFi.h>
+#include <HTTPClient.h>
+
+// =====================================================
+// ESP32-S3 WROOM-CAM + OV2640 PIN MAPPING
+// =====================================================
+#define PWDN_GPIO_NUM    -1
+#define RESET_GPIO_NUM   -1
+#define XCLK_GPIO_NUM    15
+#define SIOD_GPIO_NUM     4
+#define SIOC_GPIO_NUM     5
+#define Y9_GPIO_NUM      16
+#define Y8_GPIO_NUM      17
+#define Y7_GPIO_NUM      18
+#define Y6_GPIO_NUM      12
+#define Y5_GPIO_NUM      10
+#define Y4_GPIO_NUM       8
+#define Y3_GPIO_NUM       9
+#define Y2_GPIO_NUM      11
+#define VSYNC_GPIO_NUM    6
+#define HREF_GPIO_NUM     7
+#define PCLK_GPIO_NUM    13
+#define LED_GPIO_NUM      2 // Onboard LED
+
+// =====================================================
+// WI-FI CONFIGURATION
+// =====================================================
+const char* ssid = "OnePlu43";
+const char* password = "123456789";
+
+// =====================================================
+// BACKEND CONFIGURATION
+// =====================================================
+const char* backendUrl = "http://10.196.64.190:8000/api/v1/devices/DEV-ARJUN-01/inspection";
+
+// Global execution control
+bool uploadCompleted = false;
+
+// Function declaration
+void captureAndUploadFrame();
+
+void setup() {
+  Serial.begin(115200);
+  delay(2000); // 2-second delay for USB CDC serial initialization
+  Serial.println("\n==================================================");
+  Serial.println("  MEDI-DISPENSE MK2: ESP32-S3 CAM STARTUP (PHASE 2)");
+  Serial.println("==================================================");
+
+  // 1. Connect Wi-Fi
+  Serial.printf("Connecting to Wi-Fi Network: %s\n", ssid);
+  WiFi.begin(ssid, password);
+  
+  unsigned long wifiStart = millis();
+  while (WiFi.status() != WL_CONNECTED && millis() - wifiStart < 10000) {
+    delay(500);
+    Serial.print(".");
+  }
+
+  if (WiFi.status() == WL_CONNECTED) {
+    Serial.println("\n[SUCCESS] Wi-Fi Connected!");
+    Serial.printf("IP Address: %s\n", WiFi.localIP().toString().c_str());
+  } else {
+    Serial.println("\n[WARNING] Wi-Fi Connection Timeout. Running in offline standalone mode.");
+  }
+
+  // 2. Camera Configuration (Using proven RGB565 initialization parameters)
+  camera_config_t config = {};
+  config.ledc_channel = LEDC_CHANNEL_0;
+  config.ledc_timer = LEDC_TIMER_0;
+
+  config.pin_d0 = Y2_GPIO_NUM;
+  config.pin_d1 = Y3_GPIO_NUM;
+  config.pin_d2 = Y4_GPIO_NUM;
+  config.pin_d3 = Y5_GPIO_NUM;
+  config.pin_d4 = Y6_GPIO_NUM;
+  config.pin_d5 = Y7_GPIO_NUM;
+  config.pin_d6 = Y8_GPIO_NUM;
+  config.pin_d7 = Y9_GPIO_NUM;
+
+  config.pin_xclk = XCLK_GPIO_NUM;
+  config.pin_pclk = PCLK_GPIO_NUM;
+  config.pin_vsync = VSYNC_GPIO_NUM;
+  config.pin_href = HREF_GPIO_NUM;
+
+  config.pin_sccb_sda = SIOD_GPIO_NUM;
+  config.pin_sccb_scl = SIOC_GPIO_NUM;
+
+  config.pin_pwdn = PWDN_GPIO_NUM;
+  config.pin_reset = RESET_GPIO_NUM;
+
+  config.xclk_freq_hz = 20000000;
+
+  // Initialize in RGB565 as verified by working configuration
+  config.pixel_format = PIXFORMAT_RGB565;
+  config.frame_size = FRAMESIZE_VGA;
+  config.jpeg_quality = 12;
+  config.fb_count = 1;
+  config.fb_location = CAMERA_FB_IN_PSRAM;
+  config.grab_mode = CAMERA_GRAB_WHEN_EMPTY;
+
+  // 3. Initialize Camera
+  Serial.println("Initializing camera...");
+  esp_err_t err = esp_camera_init(&config);
+  if (err != ESP_OK) {
+    Serial.printf("[ERROR] Camera initialization failed: 0x%x\n", err);
+    return;
+  }
+  Serial.println("[SUCCESS] Camera initialized successfully.");
+}
+
+void loop() {
+  // Execute capture and upload exactly ONCE on boot/reset to prevent database flooding
+  if (!uploadCompleted) {
+    captureAndUploadFrame();
+    uploadCompleted = true;
+    Serial.println("\n[INFO] Phase 2 Single Upload Completed. Standing by (Idle state).");
+    Serial.println("Press the EN/RST button on the ESP32 to trigger another capture/upload cycle.");
+  }
+  delay(1000);
+}
+
+/**
+ * Capture frame in RGB565, convert to JPEG in software, and upload to FastAPI backend.
+ */
+void captureAndUploadFrame() {
+  Serial.println("\n--- Triggering Image Capture & Software JPEG Conversion ---");
+  
+  #ifdef LED_GPIO_NUM
+    pinMode(LED_GPIO_NUM, OUTPUT);
+    digitalWrite(LED_GPIO_NUM, HIGH); // Onboard LED ON
+    delay(100);
+  #endif
+
+  unsigned long captureStart = millis();
+  
+  // 1. Grab raw RGB565 frame
+  camera_fb_t *fb = esp_camera_fb_get();
+  
+  #ifdef LED_GPIO_NUM
+    digitalWrite(LED_GPIO_NUM, LOW); // Onboard LED OFF
+  #endif
+
+  if (!fb) {
+    Serial.println("[ERROR] Failed to capture raw image frame from camera sensor.");
+    return;
+  }
+
+  // Store metadata locally before returning the frame buffer
+  int width = fb->width;
+  int height = fb->height;
+
+  // 2. Perform software conversion to JPEG (needed for downstream YOLO/OCR pipeline)
+  uint8_t *jpg_buf = NULL;
+  size_t jpg_len = 0;
+
+  bool converted = frame2jpg(
+    fb,
+    80,              // JPEG quality (0-100)
+    &jpg_buf,
+    &jpg_len
+  );
+
+  // Return the raw frame buffer immediately to prevent memory leaks
+  esp_camera_fb_return(fb);
+
+  if (!converted) {
+    Serial.println("[ERROR] Software conversion from RGB565 to JPEG failed.");
+    return;
+  }
+
+  Serial.println("[SUCCESS] Image captured and converted successfully!");
+  Serial.printf("  Original Resolution: %d x %d\n", width, height);
+  Serial.printf("  Converted JPEG Size: %u bytes\n", (unsigned int)jpg_len);
+  Serial.printf("  Capture & Compression time: %lu ms\n", millis() - captureStart);
+
+  // 3. Connect to Backend and POST Image
+  if (WiFi.status() != WL_CONNECTED) {
+    Serial.println("[ERROR] Wi-Fi is disconnected. Aborting upload.");
+    free(jpg_buf);
+    return;
+  }
+
+  Serial.printf("\n--- Starting HTTP Upload to Backend ---\n");
+  Serial.printf("  URL: %s\n", backendUrl);
+
+  HTTPClient http;
+  
+  // Set 15-second timeout to accommodate YOLO inference + OCR on backend
+  http.setTimeout(15000); 
+  
+  if (!http.begin(backendUrl)) {
+    Serial.println("[ERROR] HTTPClient failed to start connection.");
+    free(jpg_buf);
+    return;
+  }
+
+  // Define custom multipart boundary
+  String boundary = "----ESP32Boundary" + String(random(1000, 9999));
+  http.addHeader("Content-Type", "multipart/form-data; boundary=" + boundary);
+
+  // Construct Multipart Header
+  String header = "--" + boundary + "\r\n";
+  header += "Content-Disposition: form-data; name=\"file\"; filename=\"capture.jpg\"\r\n";
+  header += "Content-Type: image/jpeg\r\n\r\n";
+
+  // Construct Multipart Footer
+  String footer = "\r\n--" + boundary + "--\r\n";
+
+  // Total content length is header + binary JPEG payload + footer
+  size_t totalLength = header.length() + jpg_len + footer.length();
+  
+  Serial.printf("  Total payload size to transmit: %u bytes\n", (unsigned int)totalLength);
+
+  // Allocate contiguous buffer in memory to combine header, payload and footer
+  uint8_t *multipartBuffer = (uint8_t *)malloc(totalLength);
+  if (!multipartBuffer) {
+    // Fallback: try to allocate in external PSRAM if internal SRAM is full
+    multipartBuffer = (uint8_t *)ps_malloc(totalLength);
+  }
+
+  if (!multipartBuffer) {
+    Serial.println("[ERROR] Failed to allocate transmission buffer (Out of Memory).");
+    free(jpg_buf);
+    return;
+  }
+
+  // Assemble the raw HTTP body
+  memcpy(multipartBuffer, header.c_str(), header.length());
+  memcpy(multipartBuffer + header.length(), jpg_buf, jpg_len);
+  memcpy(multipartBuffer + header.length() + jpg_len, footer.c_str(), footer.length());
+
+  unsigned long uploadStart = millis();
+
+  // Perform HTTP POST request
+  int httpCode = http.POST(multipartBuffer, totalLength);
+  unsigned long duration = millis() - uploadStart;
+
+  // 4. Report Upload & Response Metrics
+  if (httpCode > 0) {
+    Serial.println("\n==================================================");
+    if (httpCode == 200) {
+      Serial.println("  [SUCCESS] Upload Succeeded!");
+    } else {
+      Serial.printf("  [WARNING] Upload returned non-200 code!\n");
+    }
+    Serial.println("==================================================");
+    Serial.printf("  Backend URL:        %s\n", backendUrl);
+    Serial.printf("  HTTP Response Code: %d\n", httpCode);
+    Serial.printf("  Upload / RT Time:   %lu ms\n", duration);
+    
+    // Read and print response body
+    String responseBody = http.getString();
+    Serial.println("  Response Body:");
+    Serial.println(responseBody);
+    Serial.println("==================================================");
+  } else {
+    Serial.println("\n==================================================");
+    Serial.println("  [ERROR] Upload Failed!");
+    Serial.println("==================================================");
+    Serial.printf("  Backend URL:        %s\n", backendUrl);
+    Serial.printf("  Error Details:      %s\n", http.errorToString(httpCode).c_str());
+    Serial.printf("  Round-trip Time:    %lu ms\n", duration);
+    Serial.println("==================================================");
+  }
+
+  // 5. Memory Cleanup
+  free(multipartBuffer);
+  free(jpg_buf);
+  Serial.println("All capture and transmission buffers released. System safe.");
+}

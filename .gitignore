@@ -1,0 +1,52 @@
+# =============================================================================
+# MediDispense GitIgnore Rules
+# =============================================================================
+
+# Byte-compiled / optimized / DLL files
+__pycache__/
+*.py[cod]
+*$py.class
+
+# Environment and sensitive configuration
+.env
+.env.local
+medidispense-ui/.env.local
+
+# Virtual environments
+venv/
+.venv/
+env/
+
+# Project Reports & Private Documentation (Do NOT push to GitHub)
+project_reports/
+reports/
+Project_Reports_Context/
+
+# Training runs, checkpoints & MLflow artifacts
+runs/
+*.cache
+mlruns/
+
+# Large Training Datasets (Keep repo lightweight; use external drive/LFS for raw sets)
+dataset/
+dataset_backup_original/
+models/model_b/dataset_backup_*/
+
+# Root temporary / downloaded weights (Preserve models/production/)
+/yolo11s.pt
+/yolo26n.pt
+*.tmp
+
+# Pytest / Coverage / QA cache
+.pytest_cache/
+.coverage
+htmlcov/
+
+# Node / UI build artifacts
+medidispense-ui/node_modules/
+medidispense-ui/dist/
+
+# Output / debug images (Preserve inventory data structure)
+output/*.jpg
+output/*.png
+!output/inventory_data/
