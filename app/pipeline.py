@@ -12,8 +12,10 @@ from config import (
     CONF_MODEL_A, CONF_MODEL_B,
     SAVE_STAGE_IMAGES, DEBUG_DIR,
     PERSPECTIVE_ENABLED, PERSPECTIVE_WIDTH, PERSPECTIVE_HEIGHT,
+    EXPECTED_LAYOUT,
 )
 from pipeline.inspection_result import InspectionResult, PocketResult, StageImages
+from pipeline.layout import order_boxes, check_layout
 
 
 def _as_numpy_boxes(boxes_xyxy):
@@ -31,14 +33,16 @@ def _as_numpy_boxes(boxes_xyxy):
 class Pipeline:
     def __init__(self, strip_detector=None, perspective_fn=None,
                  pocket_detector=None, classifier=None,
-                 conf_a=None, conf_b=None):
+                 conf_a=None, conf_b=None, expected_layout=None):
         """
         Args:
             strip_detector: callable(image) -> list of strip crops
             perspective_fn: callable(crop) -> rectified image
             pocket_detector: callable(image) -> list of (x1,y1,x2,y2) boxes
             classifier: callable(list_of_crops) -> list of (class, confidence)
+            expected_layout: (rows, cols) to check detected pockets against, or None
         """
+        self.expected_layout = expected_layout
         self.strip_detector = strip_detector
         self.perspective_fn = perspective_fn
         self.pocket_detector = pocket_detector
@@ -110,6 +114,7 @@ class Pipeline:
             classifier=classifier,
             conf_a=conf_a,
             conf_b=conf_b,
+            expected_layout=EXPECTED_LAYOUT,
         )
 
     def run(self, image, debug=False, conf_a=None, conf_b=None):
@@ -146,19 +151,30 @@ class Pipeline:
         # Stage 1: Model A - Detect strip
         if self.strip_detector:
             strip_crops = self.strip_detector(img, conf=model_a_conf)
-            report.append(f"✓ Stage 1 (Model A Strip Detector): {len(strip_crops)} strip region(s) found")
+            if len(strip_crops) == 1 and strip_crops[0] is img:
+                # the detector returns the input itself when it finds nothing
+                report.append("⚠ Stage 1 (Model A Strip Detector): no strip detected, using full image")
+            else:
+                report.append(f"✓ Stage 1 (Model A Strip Detector): {len(strip_crops)} strip region(s) found")
         else:
             strip_crops = [img]
             report.append("ℹ Stage 1 (Model A): Defaulting to full image")
 
         all_pocket_results = []
         stage_pocket_crops = []
+        layout_errors = []
+        layout_checked = False
+        grid = None
 
         for strip_idx, strip_img in enumerate(strip_crops):
             # Stage 2: Perspective correction
             if self.perspective_fn:
                 rectified = self.perspective_fn(strip_img)
-                report.append(f"✓ Stage 2 (Perspective Rectification): Success ({rectified.shape[1]}x{rectified.shape[0]} px)")
+                if np.array_equal(rectified, strip_img):
+                    # correct_perspective returns the input unchanged when no strip quadrilateral is found
+                    report.append(f"⚠ Stage 2 (Perspective Rectification): not applied, no strip quadrilateral found ({rectified.shape[1]}x{rectified.shape[0]} px)")
+                else:
+                    report.append(f"✓ Stage 2 (Perspective Rectification): applied ({rectified.shape[1]}x{rectified.shape[0]} px)")
             else:
                 rectified = strip_img
                 report.append("ℹ Stage 2 (Perspective): Skipped")
@@ -190,6 +206,20 @@ class Pipeline:
                 sys.path.insert(0, str(ROOT / "models" / "model_c" / "scripts"))
                 from pocket_extractor import extract_pockets
             crops_data = extract_pockets(rectified, pockets, save=False)
+
+            # Stage 4b: reading order + expected-layout check (Model B returns boxes by confidence)
+            order, cells, n_rows, n_cols = order_boxes([bb for _, _, bb in crops_data])
+            crops_data = [crops_data[i] for i in order]
+            if self.expected_layout is not None:
+                layout_ok, layout_msg = check_layout(len(crops_data), n_rows, n_cols, self.expected_layout)
+                layout_checked = True
+                if layout_ok:
+                    report.append(f"✓ Stage 4b (Layout): {n_rows}x{n_cols} grid matches expected {self.expected_layout[0]}x{self.expected_layout[1]}")
+                else:
+                    report.append(f"✗ Stage 4b (Layout): CONFIG MISMATCH, {layout_msg}")
+                    layout_errors.append(layout_msg)
+            grid = grid or (n_rows, n_cols)  # shortcut: multi-strip images report the first strip's grid
+
             crop_images = [c for _, c, _ in crops_data]
             stage_pocket_crops.extend(crop_images)
             stages.pocket_crops = crop_images
@@ -202,7 +232,7 @@ class Pipeline:
             # Stage 5: Model C - Classify each pocket
             if self.classifier and crop_images:
                 results = self.classifier(crop_images)
-                all_pocket_results.extend(zip(results, crops_data))
+                all_pocket_results.extend(zip(results, crops_data, cells))
                 report.append(f"✓ Stage 5 (Model C Tablet Classifier): {len(results)} pocket(s) classified")
 
         stages.pocket_crops = stage_pocket_crops
@@ -213,7 +243,7 @@ class Pipeline:
         except ImportError:
             sys.path.insert(0, str(ROOT / "models" / "model_c"))
             from counter import count
-        raw_counts = count([(cls, conf) for (cls, conf), _ in all_pocket_results])
+        raw_counts = count([(cls, conf) for (cls, conf), _, _ in all_pocket_results])
 
 
         result = InspectionResult(
@@ -223,15 +253,22 @@ class Pipeline:
             stages=stages,
             execution_report=report,
         )
+        if layout_checked:
+            result.layout_ok = not layout_errors
+            result.layout_error = "; ".join(layout_errors)
+        if grid:
+            result.layout_rows, result.layout_cols = grid
 
 
         # Build per-pocket results
-        for i, ((cls, conf), (_, _, bbox)) in enumerate(all_pocket_results):
+        for i, ((cls, conf), (_, _, bbox), (row, col)) in enumerate(all_pocket_results):
             result.pockets.append(PocketResult(
                 index=i + 1,
                 class_name=cls,
                 confidence=conf,
                 bbox=tuple(map(int, bbox)),
+                row=row,
+                col=col,
             ))
 
         confs = [p.confidence for p in result.pockets]
@@ -288,6 +325,9 @@ if __name__ == "__main__":
         # Top status banner
         banner = f"Total: {result.total} | Present: {result.present} | Missing: {result.missing}"
         cv2.putText(vis, banner, (15, 30), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (255, 255, 255), 2)
+        if result.layout_ok is False:
+            print(f"\n{result.status}")
+            cv2.putText(vis, "CONFIG MISMATCH", (15, 60), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 0, 255), 2)
 
         window_name = f"End-to-End Pipeline Inspection - {Path(sys.argv[1]).name}"
         cv2.namedWindow(window_name, cv2.WINDOW_NORMAL)

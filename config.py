@@ -31,6 +31,9 @@ MODEL_C_IMG_SIZE = 224
 DEBUG_DIR = ROOT / "output"
 SAVE_STAGE_IMAGES = False
 
+# --- Expected blister layout (rows, cols), orientation-agnostic; None disables the check ---
+EXPECTED_LAYOUT = (2, 5)
+
 # --- Perspective correction ---
 PERSPECTIVE_ENABLED = True
 PERSPECTIVE_WIDTH = 800

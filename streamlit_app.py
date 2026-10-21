@@ -127,6 +127,9 @@ with tab1:
         st.markdown("---")
         st.subheader("2. End-to-End Pipeline Evaluation")
 
+        if inspection_res.layout_ok is False:
+            st.error(f"🚨 **{inspection_res.status}**: tablet counts below may be unreliable.")
+
         if inspection_res.total == 0:
             st.warning("⚠️ **NO BLISTER POCKETS DETECTED**: Try lowering the 'Model B Pocket Confidence' slider in the left sidebar (e.g. set to 0.15), or ensure the blister strip is clearly visible.")
         else:

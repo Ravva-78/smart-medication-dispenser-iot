@@ -232,10 +232,8 @@ class InspectionController:
                     insp_result.total, insp_result.present, insp_result.missing,
                 )
             except Exception as err:
-                logger.warning("Vision pipeline failed (%s); using 10-present fallback.", err)
-                pockets = [PocketResult(index=i, class_name="present", confidence=0.99, bbox=(0, 0, 10, 10))
-                           for i in range(1, 11)]
-                insp_result = InspectionResult(total=10, present=10, missing=0, avg_confidence=0.99, pockets=pockets)
+                logger.error("Vision pipeline failed: %s", err, exc_info=True)
+                return APIResponse.error(f"Vision pipeline failed: {err}", status_code=500)
 
         elif raw_inspection:
             tot = max(1, raw_inspection.get("total", 10))
@@ -256,19 +254,16 @@ class InspectionController:
                 pockets=pockets,
             )
         else:
-            pockets = [PocketResult(index=i, class_name="present", confidence=0.99, bbox=(0, 0, 10, 10))
-                       for i in range(1, 11)]
-            insp_result = InspectionResult(total=10, present=10, missing=0, avg_confidence=0.99, pockets=pockets)
+            return APIResponse.error("No image or raw_inspection supplied; nothing to inspect.", status_code=400)
 
-        # Safety: ensure total is at least 1 so inventory validator succeeds
+        # Never invent a count: no pockets, or a layout that is not the expected one, is an error.
         if insp_result.total <= 0:
-            insp_result.total = 10
-            insp_result.present = 10
-            insp_result.missing = 0
-            insp_result.pockets = [
-                PocketResult(index=i, class_name="present", confidence=0.5, bbox=(0, 0, 10, 10))
-                for i in range(1, 11)
-            ]
+            return APIResponse.error(
+                "No blister pockets detected. Check camera position, lighting and that the strip is in view.",
+                status_code=422,
+            )
+        if insp_result.layout_ok is False:
+            return APIResponse.error(insp_result.status, status_code=422)
 
         # ── 5. Inventory Subsystem — Schedule-Linked Baseline Tracking ─────
         strip_id = f"strip_{patient_id}_{device_id}"

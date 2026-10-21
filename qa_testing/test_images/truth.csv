@@ -1,0 +1,5 @@
+file,total,present,missing,missing_cells
+test image 1 full medicines.png,10,10,0,
+test image 2 after eaten.png,10,9,1,r1c1
+two eaten.png,10,8,2,r1c1;r2c1
+two eaten orange.png,10,8,2,r1c1;r2c1

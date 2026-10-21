@@ -49,6 +49,9 @@ if __name__ == "__main__":
 
         banner = f"Total: {result.total} | Present: {result.present} | Missing: {result.missing}"
         cv2.putText(vis, banner, (15, 30), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (255, 255, 255), 2)
+        if result.layout_ok is False:
+            print(f"\n{result.status}")
+            cv2.putText(vis, "CONFIG MISMATCH", (15, 60), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 0, 255), 2)
 
         window_name = f"End-to-End Pipeline Inspection - {Path(sys.argv[1]).name}"
         cv2.namedWindow(window_name, cv2.WINDOW_NORMAL)
