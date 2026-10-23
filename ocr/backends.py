@@ -156,13 +156,13 @@ class TesseractBackend(AbstractOCRBackend):
 class EasyOCRBackend(AbstractOCRBackend):
     """EasyOCR backend implementation — pure Python, no external binary required."""
 
-    def __init__(self, languages: Optional[List[str]] = None, gpu: bool = False):
+    def __init__(self, languages: Optional[List[str]] = None, gpu: Optional[bool] = None):
         """
         Initialize EasyOCR backend.
 
         Args:
             languages: List of language codes (defaults to ['en']).
-            gpu: Whether to use GPU acceleration.
+            gpu: True/False forces GPU/CPU; None (default) follows config.OCR_USE_GPU and uses the GPU only when CUDA is available.
         """
         self._languages = languages if languages is not None else ["en"]
         self._gpu = gpu
@@ -175,10 +175,29 @@ class EasyOCRBackend(AbstractOCRBackend):
         except ImportError:
             logger.warning("easyocr library not installed. EasyOCRBackend disabled.")
 
+    def _wants_gpu(self) -> bool:
+        if self._gpu is not None:
+            return bool(self._gpu)
+        from config import OCR_USE_GPU
+        if not OCR_USE_GPU:
+            return False
+        try:
+            import torch
+            return bool(torch.cuda.is_available())
+        except Exception:
+            return False
+
     def _get_reader(self):
         """Lazily initialize the EasyOCR Reader (first call downloads models)."""
         if self._reader is None and self._available:
-            self._reader = self._easyocr.Reader(self._languages, gpu=self._gpu)
+            use_gpu = self._wants_gpu()
+            try:
+                self._reader = self._easyocr.Reader(self._languages, gpu=use_gpu)
+            except Exception:
+                if not use_gpu:
+                    raise
+                logger.warning("EasyOCR GPU initialisation failed; falling back to CPU.")
+                self._reader = self._easyocr.Reader(self._languages, gpu=False)
         return self._reader
 
     def get_backend_name(self) -> str:
@@ -230,5 +249,16 @@ class EasyOCRBackend(AbstractOCRBackend):
             raise OCRBackendError(f"EasyOCR extraction error: {err}") from err
 
 
-__all__ = ["AbstractOCRBackend", "MockOCRBackend", "TesseractBackend", "EasyOCRBackend"]
+_shared_easyocr = None
+
+
+def shared_easyocr() -> "EasyOCRBackend":
+    """One EasyOCR engine per process: loading a reader takes seconds and GPU memory, so managers and routes share it."""
+    global _shared_easyocr
+    if _shared_easyocr is None:
+        _shared_easyocr = EasyOCRBackend()
+    return _shared_easyocr
+
+
+__all__ = ["AbstractOCRBackend", "MockOCRBackend", "TesseractBackend", "EasyOCRBackend", "shared_easyocr"]
 

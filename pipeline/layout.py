@@ -20,6 +20,19 @@ def _cluster(values, tol):
     return ids
 
 
+def drop_fragments(boxes, min_ratio=0.6):
+    """Indices of boxes that are plausibly whole pockets.
+
+    A box much smaller than the typical pocket (e.g. a sliver at the image edge) is a fragment, not a pocket.
+    With fewer than 3 boxes there is no reliable typical size, so everything is kept.
+    """
+    b = np.asarray(boxes, dtype=float).reshape(-1, 4)
+    if len(b) < 3:
+        return list(range(len(b)))
+    w, h = b[:, 2] - b[:, 0], b[:, 3] - b[:, 1]
+    return [i for i in range(len(b)) if w[i] >= min_ratio * np.median(w) and h[i] >= min_ratio * np.median(h)]
+
+
 def order_boxes(boxes):
     """
     Args:
@@ -54,3 +67,16 @@ def check_layout(total, rows, cols, expected):
     return False, (f"expected {expected[0]}x{expected[1]} ({exp_total} pockets), "
                    f"found {rows}x{cols} grid with {total} pockets"
                    + ("" if regular else " (irregular grid)"))
+
+
+def parse_layout(text):
+    """'5x3' / '5 x 3' -> (5, 3); None/blank -> None; anything else raises ValueError."""
+    if text is None or not str(text).strip():
+        return None
+    try:
+        rows, cols = (int(p) for p in str(text).lower().replace(" ", "").split("x"))
+    except ValueError:
+        raise ValueError(f"Layout must look like 5x3 (rows x columns), got '{text}'.")
+    if not (1 <= rows <= 20 and 1 <= cols <= 20):
+        raise ValueError(f"Layout rows and columns must each be between 1 and 20, got '{text}'.")
+    return rows, cols

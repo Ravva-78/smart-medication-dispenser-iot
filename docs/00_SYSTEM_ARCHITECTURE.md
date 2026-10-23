@@ -53,9 +53,9 @@ Rather than relying on monolithic computer vision scripts, the platform is decom
 | **04** | **Clinical Decision Engine** | `clinical/` | 1.0 | ✅ Frozen | `InventoryEvent` + `MedicineIdentity` | `ComplianceDecision` |
 | **05** | **Alert Engine** | `alerting/` | 1.0 | ✅ Frozen | `ComplianceDecision` | `AlertMessage` |
 | **06** | **Backend API & Service Layer**| `backend/`, `app/` | 1.0 | ✅ Frozen | REST Request Payloads | `APIResponse` |
-| **07** | **Streamlit Dev Dashboard** | `streamlit_app.py` | 1.0 | ✅ Complete | Visual Inspections / Inputs | Interactive Diagnostics |
-| **08** | **Patient React Dashboard** | `frontend/` | - | 🔮 Planned | Web UI / Real-Time Events | Visual Monitoring |
-| **09** | **Hardware Controller** | `hardware/` | - | 🔮 Planned | `ComplianceDecision` | Actuator Motor Signals |
+| **07** | **Streamlit Dev Dashboard** | `streamlit_app.py`, `developer_apps/` | 1.0 | ✅ Complete | Visual Inspections / Inputs | Interactive Diagnostics |
+| **08** | **Clinical Telemetry UI** | `medidispense-ui/` | 2.0 | ✅ Production | React 18 + Vite, Capacitor Mobile | Live Telemetry & Blister Verifier |
+| **09** | **IoT Hardware Firmware** | `hardware/` | 2.0 | ✅ Production | ESP32-CAM OV2640 Firmware | Multi-Frame Snapshot Streamer |
 
 
 

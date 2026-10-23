@@ -210,7 +210,7 @@ smart-medication-dispenser-iot/
 │       └── ModelC_v1.0.pt     # MobileNetV3 tablet classifier
 ├── pipeline/                  # Homography matrix rectification (SVD/DLT) & pipeline math
 ├── scripts/                   # Dataset generation, annotation validation, and evaluation tools
-├── tests/                     # 140+ Automated unit, integration, and performance tests
+├── tests/                     # 310 Automated unit, integration, contract & speedup tests (100% passing)
 ├── config.py                  # Global model paths & detection confidence thresholds
 ├── requirements.txt           # Python dependencies
 └── LICENSE                    # MIT Open Source License
@@ -279,11 +279,14 @@ python test_dynamic_counts.py
 
 ## 🧪 Automated Testing & Developer Portals
 
-MediDispenseMK2 includes a complete test harness:
+MediDispenseMK2 includes a complete test harness with 310 passing automated tests:
 
 ```bash
-# Run unit and integration tests
-python -m unittest discover tests
+# Run full automated test suite (310 tests, 100% passing)
+pytest
+
+# Run JavaScript camera queue unit verification
+node tests/js/camera_queue.check.mjs
 
 # Launch Streamlit developer portals
 streamlit run developer_apps/01_vision_validation.py      # Vision subsystem isolation

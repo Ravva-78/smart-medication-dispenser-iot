@@ -22,7 +22,10 @@ if str(ROOT) not in sys.path:
 from app.pipeline import Pipeline
 from inventory.manager import InventoryManager
 from ocr.manager import OCRManager
-from ocr.backends import MockOCRBackend
+from ocr.backends import EasyOCRBackend
+from app.camera import capture_frame, CameraError
+from config import ESP32_CAM_URL
+from pipeline.layout import parse_layout
 from clinical.manager import ClinicalDecisionManager
 from clinical.models import Prescription, DoseSchedule
 from alerting.manager import AlertManager
@@ -43,7 +46,8 @@ def get_vision_pipeline(conf_a, conf_b):
     return Pipeline.from_defaults(conf_a=conf_a, conf_b=conf_b)
 
 inv_mgr = InventoryManager()
-ocr_mgr = OCRManager(backend=MockOCRBackend())
+# Real OCR only: a mock backend would report a medicine that is not on the strip.
+ocr_mgr = OCRManager(backend=EasyOCRBackend())
 clinical_mgr = ClinicalDecisionManager()
 alert_mgr = AlertManager(dispatchers=[MockAlertDispatcher()])
 
@@ -61,32 +65,62 @@ st.sidebar.header("⚙️ AI Vision Sensitivity Tuning")
 conf_a_val = st.sidebar.slider("Model A Strip Confidence", min_value=0.05, max_value=0.80, value=0.15, step=0.05)
 conf_b_val = st.sidebar.slider("Model B Pocket Confidence", min_value=0.05, max_value=0.80, value=0.20, step=0.05)
 
+# Optional: only compared with the detected grid when you type one (the grid itself is always detected)
+expected_layout_text = st.sidebar.text_input("Expected blister layout (optional, rows x cols e.g. 5x3)", value="")
+try:
+    expected_layout = parse_layout(expected_layout_text)
+except ValueError as err:
+    expected_layout = None
+    st.sidebar.error(str(err))
+
 vision_pipeline = get_vision_pipeline(conf_a_val, conf_b_val)
 
 # Input Source Selection
 st.sidebar.markdown("---")
 st.sidebar.header("📸 Image Input Source")
-input_source = st.sidebar.radio("Select Source", ["📂 Upload Image File", "📷 Live Camera Capture", "🖼️ Sample Dataset Fixture"])
+input_source = st.sidebar.radio("Select Source", ["📡 ESP32 Camera", "📂 Upload Image File", "📷 Live Camera Capture", "🖼️ Sample Dataset Fixture"])
+
+
+def _decode(data):
+    """Decode uploaded bytes; returns (image or None, error message)."""
+    img = cv2.imdecode(np.asarray(bytearray(data), dtype=np.uint8), cv2.IMREAD_COLOR) if data else None
+    return (img, "") if img is not None else (None, "The file is empty or is not a decodable image.")
+
 
 image_bgr = None
+input_error = ""
 image_filename = "frame.jpg"
 inv_state = None
 inv_event = None
 ocr_result = None
 clinical_decision = None
 
-if input_source == "📂 Upload Image File":
+if input_source == "📡 ESP32 Camera":
+    # Capture runs only on button press and is bounded by the camera timeouts in config.py.
+    cam_url = st.sidebar.text_input("ESP32 capture URL", value=ESP32_CAM_URL, placeholder="http://<esp32-ip>/capture")
+    if st.sidebar.button("📸 Capture from ESP32"):
+        with st.spinner("Capturing from ESP32..."):
+            try:
+                st.session_state["esp32_frame"] = capture_frame(cam_url)
+                st.session_state["esp32_error"] = ""
+                st.session_state["esp32_time"] = datetime.now().strftime("%H:%M:%S")
+            except CameraError as err:
+                st.session_state["esp32_frame"] = None
+                st.session_state["esp32_error"] = str(err)
+    image_bgr = st.session_state.get("esp32_frame")
+    input_error = st.session_state.get("esp32_error", "")
+    image_filename = "esp32_capture.jpg"
+
+elif input_source == "📂 Upload Image File":
     uploaded_file = st.sidebar.file_uploader("Upload Blister Strip Photo", type=["jpg", "jpeg", "png"])
     if uploaded_file is not None:
-        file_bytes = np.asarray(bytearray(uploaded_file.read()), dtype=np.uint8)
-        image_bgr = cv2.imdecode(file_bytes, cv2.IMREAD_COLOR)
+        image_bgr, input_error = _decode(uploaded_file.read())
         image_filename = uploaded_file.name
 
 elif input_source == "📷 Live Camera Capture":
     camera_file = st.sidebar.camera_input("Capture Photo of Blister Strip")
     if camera_file is not None:
-        file_bytes = np.asarray(bytearray(camera_file.read()), dtype=np.uint8)
-        image_bgr = cv2.imdecode(file_bytes, cv2.IMREAD_COLOR)
+        image_bgr, input_error = _decode(camera_file.read())
         image_filename = "camera_capture.jpg"
 
 elif input_source == "🖼️ Sample Dataset Fixture":
@@ -94,18 +128,24 @@ elif input_source == "🖼️ Sample Dataset Fixture":
     if sample_images:
         selected_path = st.sidebar.selectbox("Choose Sample Image", [str(p) for p in sample_images[:10]])
         image_bgr = cv2.imread(selected_path)
+        input_error = "" if image_bgr is not None else f"Could not read sample image {selected_path}."
         image_filename = Path(selected_path).name
 
 # Main Body Tabs
 tab1, tab2, tab3, tab4 = st.tabs(["🔬 AI Vision & Pipeline Execution", "📜 Subsystem Data Contracts", "📊 Patient Adherence Metrics", "🔔 Caregiver Alert History"])
 
 with tab1:
+    if input_error:
+        st.error(f"🚫 **Image input failed** ({input_source}): {input_error}")
     if image_bgr is not None:
         st.subheader("1. Real-Time Vision Model Inference")
+        st.caption(f"Image source: **{input_source}** | {image_bgr.shape[1]}x{image_bgr.shape[0]} px"
+                   + (f" | captured {st.session_state.get('esp32_time')}" if input_source == "📡 ESP32 Camera" else ""))
 
         # Run AI Vision Pipeline
         with st.spinner("Running YOLO Model A (Strip), Rectifier, Model B (Pocket), Model C (Classifier)..."):
-            inspection_res = vision_pipeline.run(image_bgr, conf_a=conf_a_val, conf_b=conf_b_val, debug=True)
+            inspection_res = vision_pipeline.run(image_bgr, conf_a=conf_a_val, conf_b=conf_b_val, debug=True,
+                                                 expected_layout=expected_layout)
 
 
         # Draw Annotated Bounding Boxes
@@ -127,11 +167,28 @@ with tab1:
         st.markdown("---")
         st.subheader("2. End-to-End Pipeline Evaluation")
 
-        if inspection_res.layout_ok is False:
-            st.error(f"🚨 **{inspection_res.status}**: tablet counts below may be unreliable.")
+        # Raw vision outputs, kept separate from the verification verdict below.
+        verification = inspection_res.verification
+        v1, v2, v3, v4 = st.columns(4)
+        v1.metric("Expected pockets", inspection_res.expected_total or "not set")
+        v2.metric("Detected pockets", inspection_res.total)
+        v3.metric("Present / Missing", f"{inspection_res.present} / {inspection_res.missing}")
+        v4.metric("Lowest pocket confidence", f"{inspection_res.min_confidence:.2f}")
+        grid = f"{inspection_res.layout_rows}x{inspection_res.layout_cols}"
+        layout_txt = {True: "matches expected layout", False: "DOES NOT match expected layout", None: "not checked"}[inspection_res.layout_ok]
+        st.caption(f"Detected grid {grid}: {layout_txt}. Verification state: **{verification}**")
 
-        if inspection_res.total == 0:
+        if verification == "VERIFIED" and inspection_res.missing == 0:
+            st.success(f"✅ **{inspection_res.status}**")
+        elif verification == "VERIFIED":
+            st.warning(f"⚠️ **{inspection_res.status}** (pocket(s) {', '.join(inspection_res.missing_cells)})")
+        elif verification == "NO_POCKETS":
             st.warning("⚠️ **NO BLISTER POCKETS DETECTED**: Try lowering the 'Model B Pocket Confidence' slider in the left sidebar (e.g. set to 0.15), or ensure the blister strip is clearly visible.")
+        else:
+            st.error(f"🚨 **{inspection_res.status}**")
+
+        if verification != "VERIFIED":
+            st.info("Inventory and clinical evaluation were not run: this inspection could not be verified. Fix the cause above and capture again.")
         else:
             now_utc = datetime.now(timezone.utc)
             prescription = Prescription(
@@ -156,15 +213,21 @@ with tab1:
             )
 
             # Process through OCR Subsystem
-            ocr_result = ocr_mgr.process_image(image_bgr, preprocess=True)
+            ocr_error = ""
+            try:
+                ocr_result = ocr_mgr.process_image(image_bgr, preprocess=True)
+            except Exception as err:  # e.g. EasyOCR missing or model weights not downloaded
+                ocr_error = str(err)
 
-            # Process through Clinical Decision Engine
-            clinical_decision = clinical_mgr.evaluate_event(
-                event=inv_event,
-                prescription=prescription,
-                identity=ocr_result.identity,
-                schedule=schedule,
-            )
+            # Process through Clinical Decision Engine, only on a verified medicine identity
+            ocr_verified = ocr_result is not None and ocr_result.status.value == "VERIFIED"
+            if ocr_verified:
+                clinical_decision = clinical_mgr.evaluate_event(
+                    event=inv_event,
+                    prescription=prescription,
+                    identity=ocr_result.identity,
+                    schedule=schedule,
+                )
 
             # Display Subsystem Metrics
             m1, m2, m3, m4 = st.columns(4)
@@ -175,14 +238,24 @@ with tab1:
                 st.metric("Inventory Event", inv_event.event_type.value)
                 st.metric("Removed Slots", str(inv_event.removed_slots))
             with m3:
-                st.metric("OCR Verified Medicine", ocr_result.identity.medicine_name if ocr_result.identity else "Unknown")
-                st.metric("OCR Confidence", f"{ocr_result.average_confidence * 100:.1f}%")
+                if ocr_result is None:
+                    st.metric("OCR", "unavailable")
+                else:
+                    name = ocr_result.identity.medicine_name if ocr_result.identity else "Unknown"
+                    st.metric("OCR medicine" + ("" if ocr_verified else " (UNVERIFIED)"), name)
+                    st.metric("OCR status", f"{ocr_result.status.value} ({ocr_result.average_confidence * 100:.0f}%)")
+                st.caption(f"OCR backend: {ocr_mgr.backend.get_backend_name()}")
             with m4:
-                st.metric("Clinical Decision", clinical_decision.outcome.value)
-                st.metric("Actionable", "YES" if clinical_decision.actionable else "NO")
+                st.metric("Clinical Decision", clinical_decision.outcome.value if clinical_decision else "not evaluated")
+                st.metric("Actionable", ("YES" if clinical_decision.actionable else "NO") if clinical_decision else "-")
+            st.caption("Inventory record is held in memory for this session only; nothing was written to the database.")
 
             # Clinical Decision Explanation Banner
-            if clinical_decision.outcome.value == "CORRECT_DOSE":
+            if clinical_decision is None:
+                st.warning("⚠️ **Medicine identity not verified**: "
+                           + (f"OCR failed ({ocr_error})." if ocr_error else "OCR could not confidently read the medicine name.")
+                           + " Clinical dose evaluation was skipped; tablet counts above are unaffected.")
+            elif clinical_decision.outcome.value == "CORRECT_DOSE":
                 st.success(f"✅ **CLINICAL VERIFICATION PASSED**: {clinical_decision.reason}")
             elif clinical_decision.outcome.value == "WRONG_MEDICINE":
                 st.error(f"🚨 **CRITICAL ALERT - WRONG MEDICINE**: {clinical_decision.reason}")
@@ -200,8 +273,6 @@ with tab2:
         image_bgr is not None
         and inv_state is not None
         and inv_event is not None
-        and ocr_result is not None
-        and clinical_decision is not None
     ):
         st.write("### 1. Inventory State Payload")
         st.json(inv_state.to_dict())
@@ -210,10 +281,10 @@ with tab2:
         st.json(inv_event.to_dict())
 
         st.write("### 3. OCR Result Payload")
-        st.json(ocr_result.to_dict())
+        st.json(ocr_result.to_dict()) if ocr_result is not None else st.info("OCR did not run or failed.")
 
         st.write("### 4. Clinical Decision Audit Record")
-        st.json(clinical_decision.to_dict())
+        st.json(clinical_decision.to_dict()) if clinical_decision is not None else st.info("Not evaluated (medicine identity unverified).")
 
 with tab3:
     st.subheader("Patient Adherence Statistics")

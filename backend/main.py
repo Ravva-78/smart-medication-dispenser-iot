@@ -32,13 +32,16 @@ import sys
 import uuid
 import logging
 import time
+import asyncio
 import concurrent.futures
+import threading
 from datetime import datetime, timezone, timedelta
 from pathlib import Path
 from typing import Optional, Dict, Any, List
 
 from fastapi import FastAPI, HTTPException, UploadFile, File, Form, Body
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import JSONResponse
 import numpy as np
 import cv2
 
@@ -73,6 +76,24 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
+from backend.camera_routes import router as camera_router
+from backend import warmup
+from config import WARMUP_ON_START
+from pipeline.layout import parse_layout
+app.include_router(camera_router)
+from backend.ocr_routes import router as ocr_router
+from backend.test_catalogue_routes import router as test_catalogue_router
+app.include_router(ocr_router)
+app.include_router(test_catalogue_router)
+
+
+def _start_warmup():
+    if WARMUP_ON_START:
+        warmup.start(_api_service)
+
+
+app.router.on_startup.append(_start_warmup)
 
 # ── Singleton service and repositories ───────────────────────────────────────
 api_service = None
@@ -185,10 +206,15 @@ def _fallback_db():
     return _memory_db
 
 
+_service_lock = threading.Lock()
+
+
 def _api_service() -> DispenserAPIService:
     global api_service
     if api_service is None:
-        api_service = DispenserAPIService()
+        with _service_lock:  # the start-up warm-up and a first request must not both build the service
+            if api_service is None:
+                api_service = DispenserAPIService()
     return api_service
 
 def _db():
@@ -225,6 +251,32 @@ _settings_store: Dict = {
 # Default fallback datasets for graceful offline degradation
 DEFAULT_PATIENTS = [
     {
+        "patient_id": "PAT-001",
+        "name": "Ravi Kumar",
+        "ward": "Ward 3",
+        "bed_number": "Bed 302",
+        "age": 58,
+        "gender": "Male",
+        "doctor": "Dr. Sharma",
+        "caregiver_contact": "+91-98765-43210",
+        "medicine_name": "Paracetamol 500mg",
+        "status": "Active",
+        "next_dose": "09:30 IST",
+    },
+    {
+        "patient_id": "PAT-002",
+        "name": "Priya Sharma",
+        "ward": "Ward 2",
+        "bed_number": "Bed 205",
+        "age": 42,
+        "gender": "Female",
+        "doctor": "Dr. Patel",
+        "caregiver_contact": "+91-98765-43211",
+        "medicine_name": "Paracetamol 500mg",
+        "status": "Active",
+        "next_dose": "09:30 IST",
+    },
+    {
         "patient_id": "PAT-ARJUN-01",
         "name": "Arjun Mehta",
         "ward": "Ward A",
@@ -253,6 +305,30 @@ DEFAULT_PATIENTS = [
 ]
 
 DEFAULT_DEVICES = [
+    {
+        "device_id": "DEV-001",
+        "ward": "Ward 3",
+        "room": "Room 302",
+        "status": "Online",
+        "battery_level": 88,
+        "slots_used": 0,
+        "slots_total": 10,
+        "patient_id": "PAT-001",
+        "camera_id": "CAM-001",
+        "last_seen": "Just now",
+    },
+    {
+        "device_id": "DEV-002",
+        "ward": "Ward 2",
+        "room": "Room 205",
+        "status": "Online",
+        "battery_level": 95,
+        "slots_used": 0,
+        "slots_total": 10,
+        "patient_id": "PAT-002",
+        "camera_id": "CAM-002",
+        "last_seen": "Just now",
+    },
     {
         "device_id": "DEV-ARJUN-01",
         "ward": "Ward A",
@@ -289,6 +365,30 @@ DEFAULT_MEDS = [
 DEFAULT_ALERTS = []
 
 DEFAULT_PRESCRIPTIONS = [
+    {
+        "prescription_id": "RX-001",
+        "patient_id": "PAT-001",
+        "patient_name": "Ravi Kumar",
+        "medicine_name": "Paracetamol",
+        "strength": "500mg",
+        "frequency": "Three times daily",
+        "start_date": "2026-08-01",
+        "end_date": "2026-08-30",
+        "doctor": "Dr. Sharma",
+        "active": True,
+    },
+    {
+        "prescription_id": "RX-002",
+        "patient_id": "PAT-002",
+        "patient_name": "Priya Sharma",
+        "medicine_name": "Paracetamol",
+        "strength": "500mg",
+        "frequency": "Twice daily",
+        "start_date": "2026-08-01",
+        "end_date": "2026-08-30",
+        "doctor": "Dr. Patel",
+        "active": True,
+    },
     {
         "prescription_id": "RX-ARJUN-01",
         "patient_id": "PAT-ARJUN-01",
@@ -586,12 +686,14 @@ async def inspect_device(
     simulated_ocr_text: Optional[str] = Form(None),
     total_slots: Optional[int] = Form(10),
     missing_count: Optional[int] = Form(0),
+    layout: Optional[str] = Form(None),  # operator-confirmed blister layout, e.g. "5x3"
 ):
     """
     IoT Camera Inspection Trigger Endpoint.
     Routes by device_id -> Patient -> Prescription, runs AI subsystems,
     and persists session in MongoDB.
     """
+    await asyncio.to_thread(warmup.wait)  # a scan that arrives while the models warm up waits, without blocking other requests
     image_array = None
     if file is not None:
         contents = await file.read()
@@ -613,18 +715,25 @@ async def inspect_device(
             "missing_indices": list(range(1, mc + 1)) if mc > 0 else [],
         }
 
+    try:
+        expected_layout = parse_layout(layout)
+    except ValueError as err:
+        raise HTTPException(status_code=422, detail=str(err))
+
     res = _api_service().inspect_device(
         device_id=device_id,
         image_array=image_array,
         raw_inspection=raw_inspection,
         simulated_ocr_text=simulated_ocr_text,
+        expected_layout=expected_layout,
     )
 
     if not res.success:
+        if res.data:  # keep the detected grid so the UI can offer confirm/correct
+            return JSONResponse(status_code=res.status_code, content=_sanitize({"detail": res.error_message, "data": res.data}))
         raise HTTPException(status_code=res.status_code, detail=res.error_message)
 
     return _sanitize(res.to_dict())
-
 
 
 # ═══════════════════════════════════════════════════════════════════════════════

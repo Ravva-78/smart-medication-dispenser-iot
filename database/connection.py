@@ -148,6 +148,24 @@ def _create_fallback_db():
     # 1. Patients
     db["patients"].insert_many([
         {
+            "patient_id":      "PAT-001",
+            "name":            "Ravi Kumar",
+            "age":             58,
+            "gender":          "Male",
+            "caregiver_phone": "+919876543210",
+            "ward":            "Ward 3",
+            "bed":             "302",
+        },
+        {
+            "patient_id":      "PAT-002",
+            "name":            "Priya Sharma",
+            "age":             42,
+            "gender":          "Female",
+            "caregiver_phone": "+919876543211",
+            "ward":            "Ward 2",
+            "bed":             "205",
+        },
+        {
             "patient_id":      "PAT-ARJUN-01",
             "name":            "Arjun Mehta",
             "age":             45,
@@ -169,6 +187,28 @@ def _create_fallback_db():
     
     # 2. Devices
     db["devices"].insert_many([
+        {
+            "device_id":     "DEV-001",
+            "patient_id":    "PAT-001",
+            "camera_id":     "CAM-001",
+            "status":        "Online",
+            "battery_level": 88,
+            "slots_used":    0,
+            "slots_total":   10,
+            "ward":          "Ward 3",
+            "room":          "Room 302",
+        },
+        {
+            "device_id":     "DEV-002",
+            "patient_id":    "PAT-002",
+            "camera_id":     "CAM-002",
+            "status":        "Online",
+            "battery_level": 95,
+            "slots_used":    0,
+            "slots_total":   10,
+            "ward":          "Ward 2",
+            "room":          "Room 205",
+        },
         {
             "device_id":     "DEV-ARJUN-01",
             "patient_id":    "PAT-ARJUN-01",
@@ -255,6 +295,30 @@ def _create_fallback_db():
     # 4. Prescriptions
     db["prescriptions"].insert_many([
         {
+            "prescription_id": "RX-001",
+            "patient_id":      "PAT-001",
+            "medicine_id":     "MED-001",
+            "medicine_name":   "Paracetamol",
+            "strength":        "500mg",
+            "dosage_form":     "Tablet",
+            "doses_per_intake": 1,
+            "times":           ["08:00", "14:00", "20:00"],
+            "active":          True,
+            "doctor":          "Dr. Sharma",
+        },
+        {
+            "prescription_id": "RX-002",
+            "patient_id":      "PAT-002",
+            "medicine_id":     "MED-001",
+            "medicine_name":   "Paracetamol",
+            "strength":        "500mg",
+            "dosage_form":     "Tablet",
+            "doses_per_intake": 1,
+            "times":           ["09:00", "21:00"],
+            "active":          True,
+            "doctor":          "Dr. Patel",
+        },
+        {
             "prescription_id": "RX-ARJUN-01",
             "patient_id":      "PAT-ARJUN-01",
             "medicine_id":     "MED-001",
@@ -289,6 +353,28 @@ def _create_fallback_db():
         return (now_ist + timedelta(hours=delta_hours)).strftime("%H:%M")
         
     db["daily_schedule"].insert_many([
+        {
+            "schedule_id":     "SCHED-001",
+            "patient_id":      "PAT-001",
+            "prescription_id": "RX-001",
+            "medicine_name":   "Paracetamol",
+            "strength":        "500mg",
+            "target_time":     _t(0),
+            "status":          "PENDING",
+            "device_id":       "DEV-001",
+            "date":            now_ist.date().isoformat(),
+        },
+        {
+            "schedule_id":     "SCHED-002",
+            "patient_id":      "PAT-002",
+            "prescription_id": "RX-002",
+            "medicine_name":   "Paracetamol",
+            "strength":        "500mg",
+            "target_time":     _t(0),
+            "status":          "PENDING",
+            "device_id":       "DEV-002",
+            "date":            now_ist.date().isoformat(),
+        },
         {
             "schedule_id":     "SCHED-ARJUN-01",
             "patient_id":      "PAT-ARJUN-01",
@@ -346,6 +432,34 @@ def _create_fallback_db():
         },
     ])
     
+    # 6. Scan Baselines (for verification tests)
+    db["scan_baselines"].insert_many([
+        {
+            "strip_id": "strip_PAT-001_DEV-001",
+            "schedule_id": "SCHED-001",
+            "patient_id": "PAT-001",
+            "device_id": "DEV-001",
+            "baseline_present": 10,
+            "total_slots": 10,
+            "layout_rows": 2,
+            "layout_cols": 5,
+            "layout_source": "detected",
+            "created_at": now_ist.isoformat(),
+        },
+        {
+            "strip_id": "strip_PAT-002_DEV-002",
+            "schedule_id": "SCHED-002",
+            "patient_id": "PAT-002",
+            "device_id": "DEV-002",
+            "baseline_present": 10,
+            "total_slots": 10,
+            "layout_rows": 2,
+            "layout_cols": 5,
+            "layout_source": "detected",
+            "created_at": now_ist.isoformat(),
+        },
+    ])
+    
     return db
 
 
@@ -360,6 +474,9 @@ def get_db() -> Database:
         Database instance.
     """
     global _db_instance, _fallback_db_instance
+    if _fallback_db_instance is not None:
+        return _fallback_db_instance
+
     if not MONGODB_URI:
         if _fallback_db_instance is None:
             _fallback_db_instance = _create_fallback_db()
@@ -386,8 +503,14 @@ def verify_connection() -> bool:
     Returns:
         True if connection verified (or in-memory fallback enabled).
     """
+    global _db_instance, _fallback_db_instance
+    if _fallback_db_instance is not None:
+        return True
+
     if not MONGODB_URI:
         print("[INFO] MONGODB_URI missing; using fully populated in-memory fallback database.")
+        if _fallback_db_instance is None:
+            _fallback_db_instance = _create_fallback_db()
         return True
     try:
         client = get_client()
@@ -398,7 +521,10 @@ def verify_connection() -> bool:
     except Exception as err:
         print(f"[FAIL] Connection to MongoDB Atlas failed: {err}")
         print("[INFO] Falling back to in-memory database.")
-        return False
+        if _fallback_db_instance is None:
+            _fallback_db_instance = _create_fallback_db()
+        _db_instance = _fallback_db_instance
+        return True
 
 
 if __name__ == "__main__":

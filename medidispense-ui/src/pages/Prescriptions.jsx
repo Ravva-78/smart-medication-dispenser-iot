@@ -8,6 +8,7 @@ import SortableHeader from "../components/SortableHeader";
 import FilterPills from "../components/FilterPills";
 import { useTableControls } from "../hooks/useTableControls";
 import { notifier } from "../services/NotificationService";
+import PrescriptionUploadModal from "../components/PrescriptionUploadModal";
 
 const STATUS_MAP = {
   Active: { color: "var(--green)", bg: "rgba(39,174,96,0.08)", border: "rgba(39,174,96,0.20)" },
@@ -89,8 +90,8 @@ function ViewModal({ prescription, onClose }) {
   );
 }
 
-function AddModal({ patients, initialPatientId, onSave, onClose }) {
-  const [formData, setFormData] = useState({ ...emptyForm, patientId: initialPatientId || "" });
+function AddModal({ patients, initialPatientId, initialValues, onSave, onClose }) {
+  const [formData, setFormData] = useState({ ...emptyForm, patientId: initialPatientId || "", ...initialValues });
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState("");
 
@@ -186,6 +187,8 @@ export default function Prescriptions() {
   const [editing, setEditing] = useState(null);
   const [deleting, setDeleting] = useState(null);
   const [adding, setAdding] = useState(false);
+  const [uploading, setUploading] = useState(false);   // upload dialog open
+  const [draft, setDraft] = useState(null);             // operator-reviewed values from the upload dialog (not saved)
 
   const fetchPrescriptions = useCallback(async () => {
     setLoading(true);
@@ -209,6 +212,7 @@ export default function Prescriptions() {
     await apiClient.post("/prescriptions", data);
     await fetchPrescriptions();
     setAdding(false);
+    setDraft(null);
     notifier.success("Prescription added");
   };
 
@@ -248,7 +252,8 @@ export default function Prescriptions() {
   return (
     <main className="main-content">
       {viewing && <ViewModal prescription={viewing} onClose={() => setViewing(null)} />}
-      {adding && <AddModal patients={patients} initialPatientId={patients[0]?.id} onSave={handleCreate} onClose={() => setAdding(false)} />}
+      {uploading && <PrescriptionUploadModal onClose={() => setUploading(false)} onUse={(values) => { setDraft(values); setUploading(false); setAdding(true); }} />}
+      {adding && <AddModal patients={patients} initialPatientId={patients[0]?.id} initialValues={draft} onSave={handleCreate} onClose={() => { setAdding(false); setDraft(null); }} />}
       {editing && <EditModal prescription={editing} onSave={handleUpdate} onClose={() => setEditing(null)} />}
       {deleting && <ConfirmDialog title="Delete Prescription" message={`Delete ${deleting.id}? This cannot be undone.`} onConfirm={handleDelete} onCancel={() => setDeleting(null)} />}
 
@@ -258,12 +263,20 @@ export default function Prescriptions() {
           <span className="breadcrumb-sep">/</span>
           <span className="breadcrumb-active">Prescriptions</span>
         </div>
-        <button
-          onClick={() => setAdding(true)}
-          style={{ border: "none", borderRadius: "var(--radius-sm)", background: "var(--cyan)", color: "#fff", padding: "9px 18px", fontWeight: 700, cursor: "pointer" }}
-        >
-          + Add Prescription
-        </button>
+        <div style={{ display: "flex", gap: 10 }}>
+          <button
+            onClick={() => setUploading(true)}
+            style={{ border: "1px solid var(--border-soft)", borderRadius: "var(--radius-sm)", background: "var(--bg-overlay)", color: "var(--text-secondary)", padding: "9px 18px", fontWeight: 700, cursor: "pointer" }}
+          >
+            Upload Prescription
+          </button>
+          <button
+            onClick={() => setAdding(true)}
+            style={{ border: "none", borderRadius: "var(--radius-sm)", background: "var(--cyan)", color: "#fff", padding: "9px 18px", fontWeight: 700, cursor: "pointer" }}
+          >
+            + Add Prescription
+          </button>
+        </div>
       </header>
 
       <section className="page-hero">

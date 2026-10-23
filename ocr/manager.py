@@ -31,7 +31,7 @@ import numpy as np
 from ocr.enums import OCRStatus
 from ocr.models import OCRResult, MedicineIdentity
 from ocr.preprocessing import OCRImagePreprocessor
-from ocr.backends import AbstractOCRBackend, MockOCRBackend, EasyOCRBackend
+from ocr.backends import AbstractOCRBackend, MockOCRBackend, EasyOCRBackend, shared_easyocr
 from ocr.cleaning import OCRTextCleaner
 from ocr.parser import OCREntityParser
 from ocr.verifier import OCRVerifier
@@ -58,7 +58,7 @@ class OCRManager:
             self.backend = backend
         else:
             try:
-                easy = EasyOCRBackend()
+                easy = shared_easyocr()
                 self.backend = easy if easy._available else MockOCRBackend()
             except Exception:
                 self.backend = MockOCRBackend()

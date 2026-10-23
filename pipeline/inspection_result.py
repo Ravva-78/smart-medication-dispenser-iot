@@ -34,6 +34,27 @@ class InspectionResult:
     layout_cols: int = 0
     layout_ok: Optional[bool] = None   # None = layout not checked
     layout_error: str = ""
+    expected_total: int = 0            # 0 = no expected layout configured
+    uncertain_cells: List[str] = field(default_factory=list)  # pockets below the confidence floor
+    error: str = ""                    # non-empty = inspection could not run properly
+    layout_uncertain: bool = False     # detected pockets do not form a clean rows x cols grid
+
+    @property
+    def min_confidence(self) -> float:
+        return min((p.confidence for p in self.pockets), default=0.0)
+
+    @property
+    def verification(self) -> str:
+        """FAILED | NO_POCKETS | CONFIG_MISMATCH | REVIEW_REQUIRED | VERIFIED (counts are trustworthy only for VERIFIED)."""
+        if self.error:
+            return "FAILED"
+        if self.total == 0:
+            return "NO_POCKETS"
+        if self.layout_ok is False:
+            return "CONFIG_MISMATCH"
+        if self.uncertain_cells or self.layout_uncertain:
+            return "REVIEW_REQUIRED"
+        return "VERIFIED"
 
     @property
     def missing_cells(self) -> List[str]:
@@ -49,10 +70,22 @@ class InspectionResult:
 
     @property
     def status(self) -> str:
-        if self.total == 0:
+        v = self.verification
+        if v == "FAILED":
+            return f"INSPECTION FAILED: {self.error}"
+        elif v == "NO_POCKETS":
             return "No Pockets Detected"
-        elif self.layout_ok is False:
+        elif v == "CONFIG_MISMATCH":
             return f"CONFIG MISMATCH: {self.layout_error}"
+        elif v == "REVIEW_REQUIRED":
+            why = []
+            if self.layout_uncertain:
+                why.append(f"grid detection uncertain ({self.total} pockets do not form a clean "
+                           f"{self.layout_rows}x{self.layout_cols} grid; confirm the layout)")
+            if self.uncertain_cells:
+                why.append(f"low-confidence pocket(s) {', '.join(self.uncertain_cells)} "
+                           f"(lowest confidence {self.min_confidence:.2f})")
+            return f"REVIEW REQUIRED: {'; '.join(why)}; counts are not verified"
         elif self.missing == 0:
             return "Inventory Fully Verified"
         else:
@@ -68,6 +101,14 @@ class InspectionResult:
             "missing_cells": self.missing_cells,
             "layout_ok": self.layout_ok,
             "layout_error": self.layout_error,
+            "layout_rows": self.layout_rows,
+            "layout_cols": self.layout_cols,
+            "layout_uncertain": self.layout_uncertain,
+            "expected_total": self.expected_total,
+            "verification": self.verification,
+            "uncertain_cells": self.uncertain_cells,
+            "min_confidence": round(self.min_confidence, 4),
+            "error": self.error,
             "status": self.status,
             "avg_confidence": round(self.avg_confidence, 4),
             "pockets": [{

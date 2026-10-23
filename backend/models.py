@@ -35,12 +35,12 @@ class APIResponse:
         )
 
     @classmethod
-    def error(cls, message: str, status_code: int = 400) -> "APIResponse":
+    def error(cls, message: str, status_code: int = 400, data: Optional[Dict[str, Any]] = None) -> "APIResponse":
         return cls(
             status_code=status_code,
             success=False,
             code=APIResponseCode.ERROR,
-            data={},
+            data=data or {},
             error_message=message,
         )
 

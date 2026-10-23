@@ -13,7 +13,22 @@
 
 import { useState, useEffect, useRef, useCallback } from "react";
 import { API_BASE } from "../../services/api";
+import ReverseSidePanel from "./ReverseSidePanel";
+import { fetchCameraFrame } from "./cameraCapture";
 const API_URL = API_BASE.replace("localhost", window.location.hostname);
+
+/* The browser cannot call the ESP32 directly (CORS / private-network rules); the backend fetches the JPEG.
+   Frames are requested through ./cameraCapture, which allows one camera request at a time. */
+const CAMERA_CONFIG_URL  = `${API_URL}/api/v1/camera/config`;
+
+async function cameraErrorText(res) {
+  try {
+    const d = (await res.json()).detail;
+    return (d && d.message) || (typeof d === "string" ? d : `Camera request failed (HTTP ${res.status}).`);
+  } catch {
+    return `Camera request failed (HTTP ${res.status}).`;
+  }
+}
 
 /* ── Outcome meta ────────────────────────────────────────────────────── */
 const OUTCOME_META = {
@@ -91,7 +106,9 @@ export default function TabletScan() {
   const [error,    setError]    = useState(null);
   const [scheduleRequired, setScheduleRequired] = useState(false);
 
-  const [esp32Ip, setEsp32Ip] = useState("10.196.64.228");
+  const [esp32Ip, setEsp32Ip] = useState("");           // what the backend is configured with (loaded on mount)
+  const [cameraReady, setCameraReady] = useState(false); // backend has a camera configured
+  const [esp32Error, setEsp32Error] = useState("");
   const [esp32Status, setEsp32Status] = useState("Ready");
   const [isLivePreview, setIsLivePreview] = useState(true);
   const latestBlobRef = useRef(null);
@@ -166,17 +183,51 @@ export default function TabletScan() {
 
   /* ── ESP32 Camera Polling Loop & Actions ──────────────────────────── */
   useEffect(() => {
-    if (mode !== "camera" || !isLivePreview) return;
+    if (mode !== "camera") return;
+    fetch(CAMERA_CONFIG_URL)
+      .then(r => r.json())
+      .then(c => { setEsp32Ip(c.ip || ""); setCameraReady(!!c.configured); })
+      .catch(() => setEsp32Error("Cannot reach the backend to read the camera setting. Is it running?"));
+  }, [mode]);
+
+  // Send the IP typed in the box to the backend; capture only works once the backend accepts it.
+  const applyCameraIp = async () => {
+    setEsp32Error("");
+    try {
+      const res = await fetch(CAMERA_CONFIG_URL, {
+        method: "PUT",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ ip: esp32Ip.trim() }),
+      });
+      if (!res.ok) throw new Error(await cameraErrorText(res));
+      const c = await res.json();
+      setEsp32Ip(c.ip || "");
+      setCameraReady(!!c.configured);
+      setEsp32Status("Ready");
+    } catch (err) {
+      setCameraReady(false);
+      setEsp32Error(err.message || "Could not set the camera IP.");
+    }
+  };
+
+  useEffect(() => {
+    if (mode !== "camera" || !isLivePreview || !cameraReady) return;
 
     let active = true;
     let timerId = null;
+    let failures = 0;
+    const ctrl = new AbortController();
 
     const poll = async () => {
+      if (document.hidden) {   // do not hammer the camera from a background tab
+        if (active) timerId = setTimeout(poll, 1200);
+        return;
+      }
       try {
-        const res = await fetch(`http://${esp32Ip}/capture`);
-        if (!res.ok) throw new Error();
-        const blob = await res.blob();
+        const blob = await fetchCameraFrame(API_URL, { signal: ctrl.signal });
         if (active) {
+          failures = 0;
+          setEsp32Error("");
           const url = URL.createObjectURL(blob);
           setPreview(prev => {
             if (prev && prev.startsWith("blob:")) {
@@ -188,12 +239,16 @@ export default function TabletScan() {
           setEsp32Status("Ready");
         }
       } catch (err) {
-        if (active) {
+        // paused (Stage B has the camera) or cancelled: not a camera failure, just try again later
+        if (active && err.code !== "CAMERA_PAUSED" && err.name !== "AbortError") {
+          failures += 1;
           setEsp32Status("Camera unavailable");
+          setEsp32Error(err.message || "Camera unavailable.");
         }
       } finally {
         if (active) {
-          timerId = setTimeout(poll, 1200); // Trigger next frame in 1.2 seconds
+          // next frame 1.2 s after this one finished; back off (2.4 s, 4.8 s ... max 10 s) while the camera keeps failing
+          timerId = setTimeout(poll, Math.min(1200 * 2 ** failures, 10000));
         }
       }
     };
@@ -202,9 +257,10 @@ export default function TabletScan() {
 
     return () => {
       active = false;
+      ctrl.abort();
       if (timerId) clearTimeout(timerId);
     };
-  }, [mode, isLivePreview, esp32Ip]);
+  }, [mode, isLivePreview, cameraReady]);
 
   const handleEsp32Action = async () => {
     if (isLivePreview) {
@@ -216,11 +272,10 @@ export default function TabletScan() {
         setEsp32Status("Capture successful");
       } else {
         // Fallback capture if loop has not run yet
+        if (!cameraReady) { setEsp32Error("Set the camera IP and click Apply first."); return; }
         setEsp32Status("Capturing...");
         try {
-          const res = await fetch(`http://${esp32Ip}/capture`);
-          if (!res.ok) throw new Error();
-          const blob = await res.blob();
+          const blob = await fetchCameraFrame(API_URL);
           const file = new File([blob], "esp_capture.jpg", { type: "image/jpeg" });
           setImgFile(file);
           setPreview(URL.createObjectURL(blob));
@@ -228,7 +283,7 @@ export default function TabletScan() {
           setEsp32Status("Capture successful");
         } catch (err) {
           setEsp32Status("Camera unavailable");
-          setError("ESP32 camera unavailable. Check that the camera is powered on and connected to the same Wi-Fi network.");
+          setError(`ESP32 camera unavailable: ${err.message}`);
         }
       }
     } else {
@@ -308,7 +363,7 @@ export default function TabletScan() {
       const schedInfo = payload.schedule            || {};
 
       const present = counts.present ?? 0;
-      const total   = counts.total   ?? 10;
+      const total   = counts.total   ?? 0;
       const missing = counts.missing ?? 0;
       const delta   = counts.delta   ?? 0;
 
@@ -482,16 +537,23 @@ export default function TabletScan() {
               <div style={{ display: "flex", flexDirection: "column", gap: 12 }}>
                 <div style={{ display: "flex", flexDirection: "column", gap: 6 }}>
                   <label style={{ fontSize: 12, color: "var(--text-muted,#8899aa)", fontWeight: 600 }}>ESP32 Camera IP Address:</label>
-                  <input 
-                    type="text" 
-                    value={esp32Ip} 
-                    onChange={e => setEsp32Ip(e.target.value)}
-                    placeholder="e.g. 10.196.64.228"
-                    style={{
-                      padding: 8, borderRadius: 8, border: "1px solid var(--border-dim,#2a3a4a)",
-                      background: "var(--surface-2,#1e2a3a)", color: "#fff", outline: "none", fontSize: 13
-                    }}
-                  />
+                  <div style={{ display: "flex", gap: 6 }}>
+                    <input
+                      type="text"
+                      value={esp32Ip}
+                      onChange={e => setEsp32Ip(e.target.value)}
+                      onKeyDown={e => { if (e.key === "Enter") applyCameraIp(); }}
+                      placeholder="camera IP from the Serial Monitor"
+                      style={{
+                        flex: 1, padding: 8, borderRadius: 8, border: "1px solid var(--border-dim,#2a3a4a)",
+                        background: "var(--surface-2,#1e2a3a)", color: "#fff", outline: "none", fontSize: 13
+                      }}
+                    />
+                    <button
+                      onClick={applyCameraIp}
+                      style={{ padding: "0 12px", borderRadius: 8, border: "none", background: "#0080ff", color: "#fff", fontWeight: 700, cursor: "pointer" }}
+                    >Apply</button>
+                  </div>
                 </div>
                 
                 <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", fontSize: 12 }}>
@@ -501,9 +563,12 @@ export default function TabletScan() {
                            esp32Status === "Camera unavailable" ? "#ef4444" : 
                            isLivePreview ? "#00d4ff" : "var(--text-muted,#8899aa)"
                   }}>
-                    {isLivePreview ? "🟢 Live Preview Active" : esp32Status}
+                    {!cameraReady ? "⚪ Camera not configured" : (isLivePreview && esp32Status === "Ready" ? "🟢 Live Preview Active" : esp32Status)}
                   </strong>
                 </div>
+                {esp32Error && (
+                  <div style={{ fontSize: 12, color: "#ef4444", lineHeight: 1.4 }}>⚠ {esp32Error}</div>
+                )}
 
                 <button 
                   onClick={handleEsp32Action} 
@@ -524,6 +589,7 @@ export default function TabletScan() {
                 )}
               </div>
             )}
+
           </div>
 
           {/* Scan button */}
@@ -648,6 +714,9 @@ export default function TabletScan() {
               </div>
             </div>
           )}
+
+          {/* Stage B: optional reverse-side label read (separate from the front-side result above) */}
+          {result && <ReverseSidePanel apiUrl={API_URL} sessionId={result.sessionId} scanNo={result.scanNo} />}
 
           {/* Alerts dispatched */}
           {result?.alerts?.length > 0 && (

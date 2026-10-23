@@ -7,35 +7,36 @@
 
 #include "esp_camera.h"
 #include "img_converters.h"
-#include <WiFi.h>
 #include <WebServer.h>
+#include <WiFi.h>
+
 
 // =====================================================
 // ESP32-S3 WROOM-CAM + OV2640 PIN MAPPING
 // =====================================================
-#define PWDN_GPIO_NUM    -1
-#define RESET_GPIO_NUM   -1
-#define XCLK_GPIO_NUM    15
-#define SIOD_GPIO_NUM     4
-#define SIOC_GPIO_NUM     5
-#define Y9_GPIO_NUM      16
-#define Y8_GPIO_NUM      17
-#define Y7_GPIO_NUM      18
-#define Y6_GPIO_NUM      12
-#define Y5_GPIO_NUM      10
-#define Y4_GPIO_NUM       8
-#define Y3_GPIO_NUM       9
-#define Y2_GPIO_NUM      11
-#define VSYNC_GPIO_NUM    6
-#define HREF_GPIO_NUM     7
-#define PCLK_GPIO_NUM    13
-#define LED_GPIO_NUM      2 // Onboard LED
+#define PWDN_GPIO_NUM -1
+#define RESET_GPIO_NUM -1
+#define XCLK_GPIO_NUM 15
+#define SIOD_GPIO_NUM 4
+#define SIOC_GPIO_NUM 5
+#define Y9_GPIO_NUM 16
+#define Y8_GPIO_NUM 17
+#define Y7_GPIO_NUM 18
+#define Y6_GPIO_NUM 12
+#define Y5_GPIO_NUM 10
+#define Y4_GPIO_NUM 8
+#define Y3_GPIO_NUM 9
+#define Y2_GPIO_NUM 11
+#define VSYNC_GPIO_NUM 6
+#define HREF_GPIO_NUM 7
+#define PCLK_GPIO_NUM 13
+#define LED_GPIO_NUM 2 // Onboard LED
 
 // =====================================================
 // WI-FI CONFIGURATION
 // =====================================================
-const char* ssid = "OnePlu43";
-const char* password = "123456789";
+const char *ssid = "OnePlu43";
+const char *password = "123456789";
 
 // HTTP Server on port 80
 WebServer server(80);
@@ -51,10 +52,15 @@ void setup() {
   Serial.println("  MEDI-DISPENSE MK2: ESP32-S3 CAM STARTUP (PHASE 3)");
   Serial.println("==================================================");
 
+#ifdef LED_GPIO_NUM
+  pinMode(LED_GPIO_NUM, OUTPUT);
+  digitalWrite(LED_GPIO_NUM, LOW);
+#endif
+
   // 1. Connect Wi-Fi
   Serial.printf("Connecting to Wi-Fi Network: %s\n", ssid);
   WiFi.begin(ssid, password);
-  
+
   unsigned long wifiStart = millis();
   while (WiFi.status() != WL_CONNECTED && millis() - wifiStart < 10000) {
     delay(500);
@@ -65,7 +71,8 @@ void setup() {
     Serial.println("\n[SUCCESS] Wi-Fi Connected!");
     Serial.printf("IP Address: %s\n", WiFi.localIP().toString().c_str());
   } else {
-    Serial.println("\n[WARNING] Wi-Fi Connection Timeout. Running in offline mode.");
+    Serial.println(
+        "\n[WARNING] Wi-Fi Connection Timeout. Running in offline mode.");
   }
 
   // 2. Camera Configuration (Using proven RGB565 initialization parameters)
@@ -99,9 +106,11 @@ void setup() {
   config.pixel_format = PIXFORMAT_RGB565;
   config.frame_size = FRAMESIZE_VGA;
   config.jpeg_quality = 12;
-  config.fb_count = 1;
+  config.fb_count =
+      2; // Double-buffering in PSRAM to eliminate capture blocking
   config.fb_location = CAMERA_FB_IN_PSRAM;
-  config.grab_mode = CAMERA_GRAB_WHEN_EMPTY;
+  config.grab_mode = CAMERA_GRAB_LATEST; // Instantly return latest frame
+                                         // without waiting for sensor VSYNC
 
   // 3. Initialize Camera
   Serial.println("Initializing camera...");
@@ -115,10 +124,11 @@ void setup() {
   // 4. Configure WebServer Routes
   server.on("/capture", HTTP_GET, handleCapture);
   server.on("/capture", HTTP_OPTIONS, handleOptions);
-  
+
   server.begin();
   Serial.println("[SUCCESS] HTTP server started on port 80.");
-  Serial.println("Waiting for capture requests at: http://" + WiFi.localIP().toString() + "/capture");
+  Serial.println("Waiting for capture requests at: http://" +
+                 WiFi.localIP().toString() + "/capture");
 }
 
 void loop() {
@@ -161,24 +171,23 @@ void handleOptions() {
  */
 void handleCapture() {
   Serial.println("\n--- Triggered Capture Request via HTTP GET ---");
-  
-  #ifdef LED_GPIO_NUM
-    pinMode(LED_GPIO_NUM, OUTPUT);
-    digitalWrite(LED_GPIO_NUM, HIGH); // Onboard LED ON
-    delay(100);
-  #endif
+
+#ifdef LED_GPIO_NUM
+  digitalWrite(LED_GPIO_NUM, HIGH); // Flash LED indicator ON
+#endif
 
   unsigned long captureStart = millis();
-  
+
   // 1. Grab raw RGB565 frame
   camera_fb_t *fb = esp_camera_fb_get();
-  
-  #ifdef LED_GPIO_NUM
-    digitalWrite(LED_GPIO_NUM, LOW); // Onboard LED OFF
-  #endif
+
+#ifdef LED_GPIO_NUM
+  digitalWrite(LED_GPIO_NUM, LOW); // Flash LED indicator OFF
+#endif
 
   if (!fb) {
-    Serial.println("[ERROR] Failed to capture raw image frame from camera sensor.");
+    Serial.println(
+        "[ERROR] Failed to capture raw image frame from camera sensor.");
     server.sendHeader("Access-Control-Allow-Origin", "*");
     server.send(500, "text/plain", "Camera capture failed");
     return;
@@ -188,16 +197,15 @@ void handleCapture() {
   int width = fb->width;
   int height = fb->height;
 
-  // 2. Perform software conversion to JPEG
+  // 2. Perform fast software conversion to JPEG (Quality 65 for low latency &
+  // fast network transit)
   uint8_t *jpg_buf = NULL;
   size_t jpg_len = 0;
 
-  bool converted = frame2jpg(
-    fb,
-    80,              // JPEG quality (0-100)
-    &jpg_buf,
-    &jpg_len
-  );
+  bool converted =
+      frame2jpg(fb,
+                65, // Fast JPEG quality (65): Cuts compression CPU time ~50%
+                &jpg_buf, &jpg_len);
 
   // Return the raw frame buffer immediately to prevent memory leaks
   esp_camera_fb_return(fb);
@@ -219,10 +227,10 @@ void handleCapture() {
   server.sendHeader("Access-Control-Allow-Methods", "GET, OPTIONS");
   server.sendHeader("Access-Control-Allow-Headers", "Content-Type");
   server.sendHeader("Access-Control-Allow-Private-Network", "true");
-  
+
   server.setContentLength(jpg_len);
   server.send(200, "image/jpeg", "");
-  server.sendContent((const char*)jpg_buf, jpg_len);
+  server.sendContent((const char *)jpg_buf, jpg_len);
 
   // 4. Memory Cleanup
   free(jpg_buf);

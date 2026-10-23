@@ -22,7 +22,7 @@ import uuid
 import time
 import logging
 from datetime import datetime, timezone, timedelta
-from typing import Dict, Any, Optional, List
+from typing import Dict, Any, Optional, List, Tuple
 import numpy as np
 
 from pipeline.inspection_result import InspectionResult, PocketResult
@@ -94,6 +94,7 @@ class InspectionController:
         image_array: Optional[np.ndarray] = None,
         raw_inspection: Optional[Dict[str, Any]] = None,
         simulated_ocr_text: Optional[str] = None,
+        expected_layout: Optional[Tuple[int, int]] = None,
     ) -> APIResponse:
         """
         Execute end-to-end device inspection session with full trace persistence.
@@ -219,6 +220,14 @@ class InspectionController:
                 status_code=409,
             )
 
+        # Layout precedence: the confirmed layout stored with the baseline (so every later scan of this strip
+        # must match the same geometry), else the operator's layout, else none (detection only, no expectation).
+        baseline_layout = None
+        if baseline_doc and baseline_doc.get("layout_rows") and baseline_doc.get("layout_cols"):
+            baseline_layout = (int(baseline_doc["layout_rows"]), int(baseline_doc["layout_cols"]))
+        layout_expected = baseline_layout or expected_layout
+        layout_source = "baseline" if baseline_layout else ("operator" if expected_layout else "detected")
+
         if image_array is not None:
             try:
                 pipe = self.pipe
@@ -226,10 +235,11 @@ class InspectionController:
                     from app.pipeline import Pipeline
                     pipe = Pipeline.from_defaults()
                     self.pipe = pipe
-                insp_result = pipe.run(image_array)
+                t_vision = time.perf_counter()
+                insp_result = pipe.run(image_array, expected_layout=layout_expected) if layout_expected else pipe.run(image_array)
                 logger.info(
-                    "AI pipeline completed: total=%d present=%d missing=%d",
-                    insp_result.total, insp_result.present, insp_result.missing,
+                    "AI pipeline completed in %.0f ms: total=%d present=%d missing=%d",
+                    (time.perf_counter() - t_vision) * 1000, insp_result.total, insp_result.present, insp_result.missing,
                 )
             except Exception as err:
                 logger.error("Vision pipeline failed: %s", err, exc_info=True)
@@ -256,14 +266,31 @@ class InspectionController:
         else:
             return APIResponse.error("No image or raw_inspection supplied; nothing to inspect.", status_code=400)
 
-        # Never invent a count: no pockets, or a layout that is not the expected one, is an error.
+        # Grid geometry (rows x cols x pockets) is reported separately from tablet presence (tablet_counts).
+        def _layout_info():
+            return {
+                "rows": insp_result.layout_rows, "cols": insp_result.layout_cols, "pockets": insp_result.total,
+                "source": layout_source,  # baseline | operator | detected
+                "expected": list(layout_expected) if layout_expected else None,
+                "uncertain": insp_result.layout_uncertain, "verification": insp_result.verification,
+            }
+
+        # Never invent a count: a failed, empty, mismatched or low-confidence inspection is an error.
+        if insp_result.error:
+            return APIResponse.error(insp_result.status, status_code=500, data={"layout": _layout_info()})
         if insp_result.total <= 0:
             return APIResponse.error(
                 "No blister pockets detected. Check camera position, lighting and that the strip is in view.",
-                status_code=422,
+                status_code=422, data={"layout": _layout_info()},
             )
-        if insp_result.layout_ok is False:
-            return APIResponse.error(insp_result.status, status_code=422)
+        if insp_result.verification != "VERIFIED":
+            msg = insp_result.status
+            if insp_result.verification == "CONFIG_MISMATCH" and layout_source == "baseline":
+                msg += (" The baseline for this strip used that layout; if the blister or camera position changed, "
+                        "start a new baseline (new schedule).")
+            elif insp_result.layout_uncertain:
+                msg += " Retake the photo with the whole blister in view and scan again."
+            return APIResponse.error(msg, status_code=422, data={"layout": _layout_info()})
 
         # ── 5. Inventory Subsystem — Schedule-Linked Baseline Tracking ─────
         strip_id = f"strip_{patient_id}_{device_id}"
@@ -302,6 +329,9 @@ class InspectionController:
                     "device_id": device_id,
                     "baseline_present": current_present,
                     "total_slots": eff_total,
+                    "layout_rows": insp_result.layout_rows or None,  # geometry this strip's later scans must match
+                    "layout_cols": insp_result.layout_cols or None,
+                    "layout_source": layout_source,
                     "created_at": timestamp.isoformat(),
                 })
             except Exception as e:
@@ -344,7 +374,9 @@ class InspectionController:
 
         if image_array is not None:
             try:
+                t_ocr = time.perf_counter()
                 ocr_res = self.ocr_mgr.process_image(image_array, preprocess=True)
+                logger.info("front-image OCR completed in %.0f ms", (time.perf_counter() - t_ocr) * 1000)
                 identity = ocr_res.identity
                 ocr_result_dict = ocr_res.to_dict()
             except Exception as e:
@@ -512,6 +544,7 @@ class InspectionController:
                 "missing": insp_result.missing,
                 "delta":   event.delta_present if hasattr(event, "delta_present") else 0,
             },
+            "layout": _layout_info(),
             "medicine_identity": identity.to_dict() if identity else None,
             "decision": decision.to_dict(),
             "compliance_decision": decision.to_dict(),
@@ -538,7 +571,6 @@ class InspectionController:
         }
         return mapping.get(severity.upper(), "Medication")
 
-    # ──────────────────────────────────────────────────────────────────────
     def inspect_and_evaluate(
         self,
         raw_inspection: Dict[str, Any],
@@ -546,12 +578,87 @@ class InspectionController:
         strip_id: Optional[str] = None,
         image_array: Optional[np.ndarray] = None,
     ) -> APIResponse:
-        """Backward-compatibility endpoint for legacy inspect calls."""
-        return self.inspect_device_session(
-            device_id="DEV-001",
-            image_array=image_array,
-            raw_inspection=raw_inspection,
+        """
+        Direct/legacy inspection evaluation for POST /api/v1/inspect endpoint.
+        Processes raw inspection or image array against supplied prescription and strip ID.
+        """
+        if not strip_id:
+            strip_id = f"strip_{prescription_dict.get('patient_id', 'unknown')}"
+
+        # 1. Parse or construct inspection result
+        if image_array is not None and not raw_inspection:
+            try:
+                pipe = self.pipe
+                if pipe is None:
+                    from app.pipeline import Pipeline
+                    pipe = Pipeline.from_defaults()
+                    self.pipe = pipe
+                insp_result = pipe.run(image_array)
+            except Exception as err:
+                return APIResponse.error(f"Vision pipeline failed: {err}", status_code=500)
+        elif raw_inspection:
+            tot = max(1, raw_inspection.get("total", 10))
+            pres = raw_inspection.get("present", tot)
+            miss = raw_inspection.get("missing", tot - pres)
+            miss_idx = raw_inspection.get("missing_indices", [])
+            pockets = [
+                PocketResult(
+                    index=i + 1,
+                    class_name="missing" if (i + 1) in miss_idx else "present",
+                    confidence=raw_inspection.get("avg_confidence", 0.99),
+                    bbox=(0, 0, 10, 10),
+                )
+                for i in range(tot)
+            ]
+            insp_result = InspectionResult(
+                total=tot,
+                present=pres,
+                missing=miss,
+                avg_confidence=raw_inspection.get("avg_confidence", 0.99),
+                pockets=pockets,
+            )
+        else:
+            return APIResponse.error("No inspection data or image provided.", status_code=400)
+
+        # 2. Inventory tracking
+        state, event = self.inventory_mgr.from_inspection(insp_result, strip_id=strip_id)
+
+        # 3. OCR processing if image supplied
+        identity = None
+        if image_array is not None:
+            try:
+                ocr_res = self.ocr_mgr.process_image(image_array, preprocess=True)
+                identity = ocr_res.identity
+            except Exception as e:
+                logger.warning("OCR processing error in inspect_and_evaluate: %s", e)
+
+        # 4. Prescription object construction
+        rx = Prescription(
+            prescription_id=prescription_dict.get("prescription_id", "rx_default"),
+            patient_id=prescription_dict.get("patient_id", "patient_default"),
+            medicine_name=prescription_dict.get("medicine_name", "Paracetamol"),
+            strength=prescription_dict.get("strength", "500mg"),
+            dosage_form=prescription_dict.get("dosage_form", "Tablet"),
         )
+
+        # 5. Clinical compliance decision
+        decision = self.clinical_mgr.evaluate_event(
+            event=event,
+            prescription=rx,
+            identity=identity,
+        )
+
+        # 6. Alert dispatch
+        messages = self.alert_mgr.process_decision(decision)
+
+        return APIResponse.ok({
+            "strip_id": strip_id,
+            "inventory_state": state.to_dict(),
+            "inventory_event": event.to_dict(),
+            "decision": decision.to_dict(),
+            "medicine_identity": identity.to_dict() if identity else None,
+            "dispatched_alerts": [m.to_dict() for m in messages],
+        })
 
 
 __all__ = ["InspectionController"]

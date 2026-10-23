@@ -40,8 +40,8 @@ def main():
 
     truth_path = Path(args.truth)
     rows = list(csv.DictReader(truth_path.open(newline="", encoding="utf-8")))
-    failures = 0
-    print(f"{'image':34} {'truth T/P/M':>12} {'got T/P/M':>12}  counts  cells  layout")
+    failures = dishonest = 0
+    print(f"{'image':34} {'truth T/P/M':>12} {'got T/P/M':>12}  counts cells  layout    verification     status-honest")
     for row in rows:
         want = (int(row["total"]), int(row["present"]), int(row["missing"]))
         r = pipe.run(truth_path.parent / row["file"])
@@ -53,17 +53,25 @@ def main():
         cells_ok = None if got_cells is None or "missing_cells" not in row else got_cells == want_cells
 
         layout_ok = getattr(r, "layout_ok", None)
-        layout_txt = "n/a" if layout_ok is None else ("ok" if layout_ok else "MISMATCH")
+        grid_txt = f"{getattr(r, 'layout_rows', 0)}x{getattr(r, 'layout_cols', 0)}"
+        layout_txt = grid_txt + ("" if layout_ok is None else (" ok" if layout_ok else " MISMATCH"))
+
+        # Classification accuracy (counts, cells) and status honesty are reported separately:
+        # a wrong result is only acceptable if the pipeline did not call it VERIFIED.
+        verification = getattr(r, "verification", "n/a")
+        honest = counts_ok and cells_ok is not False or verification != "VERIFIED"
 
         ok = counts_ok and cells_ok is not False
         failures += not ok
+        dishonest += not honest
         fmt = lambda v: "n/a" if v is None else ("PASS" if v else "FAIL")
         print(f"{row['file'][:34]:34} {'/'.join(map(str, want)):>12} {'/'.join(map(str, got)):>12}  "
-              f"{fmt(counts_ok):6} {fmt(cells_ok):6} {layout_txt}")
+              f"{fmt(counts_ok):6} {fmt(cells_ok):6} {layout_txt:9} {verification:16} {fmt(honest)}")
         if not ok:
             print(f"    missing cells: want {want_cells} got {got_cells}")
-    print(f"\n{len(rows) - failures}/{len(rows)} passed")
-    sys.exit(1 if failures else 0)
+    print(f"\nclassification: {len(rows) - failures}/{len(rows)} correct | "
+          f"status honesty: {len(rows) - dishonest}/{len(rows)} (wrong result labelled VERIFIED = dishonest)")
+    sys.exit(1 if failures or dishonest else 0)
 
 
 if __name__ == "__main__":

@@ -50,3 +50,6 @@ medidispense-ui/dist/
 output/*.jpg
 output/*.png
 !output/inventory_data/
+test_*.jpg
+test_*.png
+

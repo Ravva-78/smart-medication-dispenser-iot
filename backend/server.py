@@ -5,7 +5,7 @@ Purpose:
     Exposes unified facade methods for REST API routes and health checks.
 """
 
-from typing import Dict, Any, Optional
+from typing import Dict, Any, Optional, Tuple
 import numpy as np
 
 from inventory.manager import InventoryManager
@@ -76,6 +76,7 @@ class DispenserAPIService:
         image_array: Optional[np.ndarray] = None,
         raw_inspection: Optional[Dict[str, Any]] = None,
         simulated_ocr_text: Optional[str] = None,
+        expected_layout: Optional[Tuple[int, int]] = None,
     ) -> APIResponse:
         """POST /api/v1/devices/{device_id}/inspection endpoint."""
         return self.inspection_controller.inspect_device_session(
@@ -83,6 +84,7 @@ class DispenserAPIService:
             image_array=image_array,
             raw_inspection=raw_inspection,
             simulated_ocr_text=simulated_ocr_text,
+            expected_layout=expected_layout,
         )
 
     def process_inspection_and_evaluate(

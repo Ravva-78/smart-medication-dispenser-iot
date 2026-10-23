@@ -12,10 +12,10 @@ from config import (
     CONF_MODEL_A, CONF_MODEL_B,
     SAVE_STAGE_IMAGES, DEBUG_DIR,
     PERSPECTIVE_ENABLED, PERSPECTIVE_WIDTH, PERSPECTIVE_HEIGHT,
-    EXPECTED_LAYOUT,
+    EXPECTED_LAYOUT, MIN_POCKET_CONF,
 )
 from pipeline.inspection_result import InspectionResult, PocketResult, StageImages
-from pipeline.layout import order_boxes, check_layout
+from pipeline.layout import order_boxes, check_layout, drop_fragments
 
 
 def _as_numpy_boxes(boxes_xyxy):
@@ -33,7 +33,7 @@ def _as_numpy_boxes(boxes_xyxy):
 class Pipeline:
     def __init__(self, strip_detector=None, perspective_fn=None,
                  pocket_detector=None, classifier=None,
-                 conf_a=None, conf_b=None, expected_layout=None):
+                 conf_a=None, conf_b=None, expected_layout=None, min_pocket_conf=None):
         """
         Args:
             strip_detector: callable(image) -> list of strip crops
@@ -43,6 +43,7 @@ class Pipeline:
             expected_layout: (rows, cols) to check detected pockets against, or None
         """
         self.expected_layout = expected_layout
+        self.min_pocket_conf = min_pocket_conf  # None disables the low-confidence check
         self.strip_detector = strip_detector
         self.perspective_fn = perspective_fn
         self.pocket_detector = pocket_detector
@@ -115,9 +116,10 @@ class Pipeline:
             conf_a=conf_a,
             conf_b=conf_b,
             expected_layout=EXPECTED_LAYOUT,
+            min_pocket_conf=MIN_POCKET_CONF,
         )
 
-    def run(self, image, debug=False, conf_a=None, conf_b=None):
+    def run(self, image, debug=False, conf_a=None, conf_b=None, expected_layout=None):
         """
         Run the full pipeline with stage execution reporting.
 
@@ -131,14 +133,25 @@ class Pipeline:
             InspectionResult
         """
         report = []
+        errors = []
+        layout = expected_layout or self.expected_layout  # per-call override (e.g. a confirmed baseline layout)
+
+        if image is None or (isinstance(image, np.ndarray) and image.size == 0):
+            image = np.zeros((100, 100, 3), dtype=np.uint8)
+            errors.append("empty input image")
+            report.append("✗ Empty input image")
 
         if isinstance(image, (str, Path)):
-            img = cv2.imread(str(image))
+            try:
+                img = cv2.imread(str(image))
+            except Exception:  # ultralytics patches cv2.imread to raise on a missing file
+                img = None
             if img is not None:
                 report.append(f"✓ Input Image Loaded: {Path(image).name} ({img.shape[1]}x{img.shape[0]} px)")
             else:
                 img = np.zeros((100, 100, 3), dtype=np.uint8)
                 report.append(f"✗ Failed to load image: {Path(image).name}")
+                errors.append(f"could not read image '{Path(image).name}'")
         else:
             img = image.copy()
             report.append(f"✓ Input Image Loaded: NumPy Array ({img.shape[1]}x{img.shape[0]} px)")
@@ -160,10 +173,16 @@ class Pipeline:
             strip_crops = [img]
             report.append("ℹ Stage 1 (Model A): Defaulting to full image")
 
+        if self.pocket_detector is None:
+            errors.append("Model B (pocket detector) is not loaded")
+        if self.classifier is None:
+            errors.append("Model C (tablet classifier) is not loaded")
+
         all_pocket_results = []
         stage_pocket_crops = []
         layout_errors = []
         layout_checked = False
+        layout_uncertain = False
         grid = None
 
         for strip_idx, strip_img in enumerate(strip_crops):
@@ -207,14 +226,20 @@ class Pipeline:
                 from pocket_extractor import extract_pockets
             crops_data = extract_pockets(rectified, pockets, save=False)
 
-            # Stage 4b: reading order + expected-layout check (Model B returns boxes by confidence)
+            # Stage 4b: ignore sliver detections, then reading order + expected-layout check (Model B returns boxes by confidence)
+            keep = drop_fragments([bb for _, _, bb in crops_data])
+            if len(keep) < len(crops_data):
+                report.append(f"ℹ Stage 4b: ignored {len(crops_data) - len(keep)} fragment box(es) much smaller than a normal pocket")
+                crops_data = [crops_data[i] for i in keep]
             order, cells, n_rows, n_cols = order_boxes([bb for _, _, bb in crops_data])
             crops_data = [crops_data[i] for i in order]
-            if self.expected_layout is not None:
-                layout_ok, layout_msg = check_layout(len(crops_data), n_rows, n_cols, self.expected_layout)
+            if len(crops_data) != n_rows * n_cols:
+                layout_uncertain = True  # pockets do not form a clean grid, whatever the expectation
+            if layout is not None:
+                layout_ok, layout_msg = check_layout(len(crops_data), n_rows, n_cols, layout)
                 layout_checked = True
                 if layout_ok:
-                    report.append(f"✓ Stage 4b (Layout): {n_rows}x{n_cols} grid matches expected {self.expected_layout[0]}x{self.expected_layout[1]}")
+                    report.append(f"✓ Stage 4b (Layout): {n_rows}x{n_cols} grid matches expected {layout[0]}x{layout[1]}")
                 else:
                     report.append(f"✗ Stage 4b (Layout): CONFIG MISMATCH, {layout_msg}")
                     layout_errors.append(layout_msg)
@@ -253,9 +278,13 @@ class Pipeline:
             stages=stages,
             execution_report=report,
         )
+        result.error = "; ".join(errors)
         if layout_checked:
             result.layout_ok = not layout_errors
             result.layout_error = "; ".join(layout_errors)
+        result.layout_uncertain = layout_uncertain
+        if layout is not None:
+            result.expected_total = layout[0] * layout[1]
         if grid:
             result.layout_rows, result.layout_cols = grid
 
@@ -270,6 +299,10 @@ class Pipeline:
                 row=row,
                 col=col,
             ))
+
+        if self.min_pocket_conf is not None:
+            result.uncertain_cells = [f"r{p.row}c{p.col}" for p in result.pockets
+                                      if p.confidence < self.min_pocket_conf]
 
         confs = [p.confidence for p in result.pockets]
         result.avg_confidence = float(np.mean(confs)) if confs else 0.0
