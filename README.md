@@ -41,7 +41,6 @@
 - [Repository Structure](#-repository-structure)
 - [Quickstart Guide](#-quickstart-guide)
 - [Automated Testing & Developer Portals](#-automated-testing--developer-portals)
-- [IEEE Xplore Citation](#-ieee-xplore-citation)
 - [License](#-license)
 
 ---
@@ -293,25 +292,6 @@ streamlit run developer_apps/01_vision_validation.py      # Vision subsystem iso
 streamlit run developer_apps/02_inventory_validation.py   # Delta state & inventory math
 streamlit run developer_apps/06_end_to_end_validation.py   # Full live pipeline validation
 streamlit run developer_apps/07_live_dispenser_dashboard.py # Real-time dispenser telemetry
-```
-
----
-
-## 📄 IEEE Xplore Citation
-
-If you use this work, codebase, or dataset in your research, please cite our paper:
-
-```bibtex
-@article{nagarjun2026medidispense,
-  author    = {Pallavi B. and Ravva Nagarjun and Pallavi M. R. and Rizaulla Ahmed S. A.},
-  title     = {IoT-Based Approaches for an Automated and Eco-Sustainable Clinical Medicine Delivery Ecosystem: A Systematic Review and Conceptual Framework},
-  journal   = {IEEE Transactions on Healthcare Informatics and Systems / IEEE Xplore},
-  year      = {2026},
-  volume    = {},
-  number    = {},
-  pages     = {1--14},
-  publisher = {IEEE}
-}
 ```
 
 ---
